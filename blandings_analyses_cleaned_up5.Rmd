@@ -61,7 +61,6 @@ kable.wrap <- function(x,caption,row.names=NA){
 * Make sure date is in YYYY-MM-DD
 
 ```{r}
-setwd("G:/todays files/3-1-23/blandings/for paper")
 meta <- read.csv("Supplemental.metadata.csv")
 
 rownames(meta) <- meta$sample.ID
@@ -1228,7 +1227,7 @@ venn.trip <- function(data, category = rep("",
 
 * Examine results of 3 Zymo Research mock bacterial communities that were extracted and sequenced alongside the actual samples
 
-```{r}
+```{r, eval = FALSE}
 mock <- read.csv("Supplemental mock.csv")
 
 ggplot(mock,aes(x=sample,y=proportion.of.reads,fill=species))+
