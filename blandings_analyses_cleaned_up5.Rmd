@@ -1,0 +1,3261 @@
+---
+title: "Supplemental material"
+author: "TBA"
+date: "19/06/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    number_sections: true
+    fig_height: 6
+    fig_width: 8
+    collapse: no
+    code_folding: hide
+    toc_float: yes
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+# Prep data
+
+## Load packages
+
+```{r}
+library(phyloseq)
+library(vegan)
+library(ggplot2)
+library(usedist)
+library(car)
+library(performance)
+library(emmeans)
+library(plyr)
+library(lme4)
+library(splitstackshape)
+library(kableExtra)
+library(ggpubr)
+library(gtable)
+library(grid)
+library(gridExtra)
+library(glmmTMB)
+library(VennDiagram)
+library(reshape2)
+library(colorBlindness)
+
+#wrapper function with settings used for tables throughout. This simplifies the code elsewhere
+# x is the object o be tuned into a kable
+# caption is the caption
+# row.names - determines whether to include row names (NA is default for kbl)
+kable.wrap <- function(x,caption,row.names=NA){
+  kable_classic(full_width = F,html_font = "Calibri",font_size = 18,kbl(x,align="c",caption=caption,row.names = row.names))
+}
+```
+
+
+
+## Load data
+
+* Load metadata (called "meta") and convert to phyloseq
+* Make sure date is in YYYY-MM-DD
+
+```{r}
+setwd("G:/todays files/3-1-23/blandings/for paper")
+meta <- read.csv("Supplemental.metadata.csv")
+
+rownames(meta) <- meta$sample.ID
+meta.phylo <- sample_data(meta)
+```
+
+* Load asv table and convert to phyloseq
+```{r}
+# function for normalizing to proportions
+prop.trans <- function(x){x/sum(x)}
+
+data <- read.csv("Supplemental.asv.csv")
+data.no.trans <- data #keeps an untransformed copy of data
+rownames(data) <- data[,1]
+data <- data[,2:(ncol(data)-1)]
+data <- as.matrix(data)
+data <- apply(data,2,prop.trans) #convert to proportions
+asv <- otu_table(data,taxa_are_rows = T)
+```
+
+* Load taxa and convert to phyloseq
+```{r}
+# this is the file where all possible labels for unknown have been replaced with "unknown_ ..." where "..." = the lowest taxonomic level available (e.g., "unknown_Bacteriodes")
+taxa <- read.csv("Supplemental.taxa.csv")
+rownames(taxa) <- taxa[,1]
+taxa <- as.matrix(taxa[,-1])
+colnames(taxa)[7] <- "ASV"
+taxa <- tax_table(taxa)
+
+# load rooted tree file and trim
+tree <- read_tree("Supplemental.rooted.tree.nwk")
+tree <- prune_taxa(rownames(asv),tree)
+```
+
+* Combine data into a phyloseq object
+```{r}
+# convert to phyloseq
+phylo <- merge_phyloseq(taxa,asv,tree, meta.phylo)
+```
+
+* Compress data at other taxonomic levels level
+```{r}
+phylo.fam <- tax_glom(phylo, "Family")
+
+phylo.ord <- tax_glom(phylo, "Order")
+
+phylo.class <- tax_glom(phylo, "Class")
+
+phylo.phy <- tax_glom(phylo, "Phylum")
+
+phylo.list <- list(phylo,phylo.fam,phylo.ord,phylo.class, phylo.phy)
+
+label.list <- list("ASV","Family","Order","Class","Phylum")
+```
+
+
+## Calculate dist objects
+
+* Will calculate both abundance and presence/absence indexes with and without phylogenetic information
+  * Bray-Curtis
+  * Jaccard
+  * Weighted unifrac
+  * Unweighted unifrac
+* Will calculate at ASV level and at family level (with unknown families grouped by lowest known taxonomic level)
+```{r}
+bray <- distance(phylo,method="bray") #calculate bray curtis dissimilarities
+wuni <- distance(phylo,method="wunifrac") #calculate weighted unifrac distances
+
+#convert data in phylo object to binary
+phylo.bin <- phylo
+phylo.bin@otu_table[which(phylo@otu_table > 0)] <- 1
+jaccard <- distance(phylo,method="jaccard") #calculate jaccard dissimilarity (same as bray curtis when using binary data)
+uni <- distance(phylo,method="unifrac") #calculate unweighted unifrac distances
+
+#as above but at family level
+
+bray.fam <- distance(phylo.fam,method="bray") #calculate bray curtis dissimilarities
+wuni.fam <- distance(phylo.fam,method="wunifrac") #calculate weighted unifrac distances
+
+#convert data in phylo object to binary
+phylo.fam.bin <- phylo.fam
+phylo.fam.bin@otu_table[which(phylo.fam.bin@otu_table > 0)] <- 1
+jaccard.fam <- distance(phylo.fam.bin,method="jaccard") #calculate jaccard dissimilarity (same as bray curtis when using binary data)
+uni.fam <- distance(phylo.fam.bin,method="unifrac") #calculate unweighted unifrac distances
+
+#make list of dist objects
+dists <- list(bray,jaccard,wuni,uni,bray.fam,jaccard.fam,wuni.fam,uni.fam)
+names(dists) <- c("Bray-Curtis","Jaccard","Weighted Unifrac","Uneighted Unifrac","Bray-Curtis: Family","Jaccard: Family","Weighted Unifrac: Family","Unweighted Unifrac: Family")
+```
+
+## Data summary
+
+* At this point, the following objects are available:
+  * meta = metadata, including richness, evenness, growth, read depth, etc.
+  * phylo = phyloseq object with data transformed to proportions
+  * phylo.fam = phylo compressed to the family level
+  * dists = A list of distance/dissimilarity objects
+    * "Bray-Curtis"
+    * "Jaccard"
+    * "Weighted Unifrac"
+    * "Unifrac"
+    * "Bray-Curtis: Family"
+    * "Jaccard: Family"
+    * "Weighted Unifrac: Family"
+    * "Unifrac: Family"
+* These data have already had much of the pseudoreplciation removed, but some additional subsetting will be required
+* The wild samples generally seemed similar regardless of location, and the sample sizes were so small within locations, that it will generally make more sense just to have a single "wild" category than having individual categories for each site. However, there are a few cases where it will be possible to use mixed effects modeling with specific location (PW or TC) nested inside general location
+
+
+## Functions
+
+### perm.loop
+
+* Takes a named list of dissimilarity objects (included in the formula name), runs PERMANOVs on each, and outputs PERMANOVA tables for each test, as well as a condensed output table from all PERMANOVAs, with adjusted P values
+* P values are adjusted per column
+  * It is assumed that the first 4 entries in the distance list are ASVs, and the last 4 are families, and it applies p.adjust separately within each
+* The final table (beginning "Summary (p values):") has raw and adjusted P values for predictors
+* Input:
+  * Form = (character) the full formula for the PERMANOVA, possibly including a dist_subset() command
+    * To grantee this, it is best to put "distance.list[[i]]" as the response in the formula (or "dist_subset(distance.list[[i]]...")
+  * data = the metadata
+  * response = (vector of characters) the factors you want P values for
+    * must be in the same order as factors in the formula, can use different names, but cannot skip or go out of order
+    * e.g., if form = "x~a+c+b" , the output will be in the order a, b, c, with the names in response assigned as column names. response could be c("a","b","c"), in which case a = "a" and so on, or other names could be substituted, but the order remains the same. Thus, if response = c("c","a","b"), then in the output, the column called "c" will actually be the results for a and so on.
+  * Caption = (character) a label you want above each output table (will follow the name of the dissimilarity object being tested or "Summary (p values)")
+  * distance.list = the list of dist objects
+```{r, results = 'asis'}
+perm.loop <- function(form, data, response,caption,distance.list){
+  set.seed(1234)
+  res <- vector("list",length(distance.list))
+  res.export <- vector("list",1)
+  for(i in 1:length(distance.list)){
+    perm.i <- adonis2(
+      as.formula(form)
+      ,data=data,permutations=5000)
+    
+    res[[i]] <- perm.i$`Pr(>F)`
+    print(kable.wrap(perm.i, caption=paste(names(distance.list)[i],caption)))
+        cat('\n')
+   }
+  
+res <- as.data.frame(do.call("rbind.data.frame",res)[,1:length(response)])
+rownames(res) <- names(distance.list)
+
+#adds columns of adjusted P values
+res1 <- cbind.data.frame(as.data.frame(res[1:4,]),
+                                         apply(as.data.frame(res[1:4,]),2,function(x){p.adjust(x,method="holm")}))
+
+res2 <- cbind.data.frame(as.data.frame(res[5:8,]),
+                                         apply(as.data.frame(res[5:8,]),2,function(x){p.adjust(x,method="holm")}))
+
+
+
+colnames(res1) <- c(response,gsub(" ",".",paste(response,"adjusted")))
+
+colnames(res2) <- c(response,gsub(" ",".",paste(response,"adjusted")))
+
+res <- rbind.data.frame(res1,res2)
+
+ print(kable.wrap(res,caption=paste("Summary (p values):",caption)))
+ 
+ res}
+```
+
+
+### dist.split
+
+* Function to convert the lower left hand side of a dist object (x) to a long format with no duplication or 0s from comparing a sample to itself
+```{r}
+split.dist <- function(x){
+  result <- NULL
+  for(b in 1:(nrow(x)-1)){
+    row.b <- c(x[b,(b+1):(ncol(x))])
+    row.b <- as.data.frame(cbind(row.b))
+    row.b$ID1 <- colnames(x)[(b+1):(ncol(x))]
+    row.b$ID2 <- rep(rownames(x)[b],nrow(row.b))
+    result <- rbind(result,row.b)
+    }
+  result}
+```
+
+
+### phylo.heat
+
+* Wrapper function for making crude heatmaps on subsets via phyloseq
+* Uses default log base 4 transformation
+* In all cases, we will convert to proportions before running
+* Inputs
+  * phyloseq.object = initial phyloseq object to subset
+  * data = data frame to base the subset on (metadata)
+  * ID.col = (character) name of column of sample IDs in data
+  * order1-4 = (character) name(s) of columns in data to order and label samples by
+    * can include up to 4 (order1, order2, etc.) others should be left to NULL
+    * sorts based on the order provided (e.g., if order1 = "date" and order2 = "type" it sorts by date, then by type )
+  * title = (character) title of the graph
+  * method = (character) see method in plot_heatmap
+  * taxa.label = (character) see taxa.label in plot_heatmap
+* phylo.heat.loop = same thing, but...
+  * for the phyloseq object, provide a list of phyloseq objects (e.g., at different taxonomic levels)
+  * For taxa.label give a list of character labels of the same length as phyloseq.object.list (e.g. names of taxa levels)
+    * The title will have the entries from taxa.label (in parentheses) at the end
+  * This will loop over the list and make a plot for each
+    * This could be accomplished within phyloseq, but the step of compressing the taxa is slow, so doing it externally saves time in the long run
+
+```{r}
+phylo.heat <- function(phyloseq.object = phylo, data, ID.col = "sample.ID", order1 = NULL, order2 = NULL, order3 = NULL, order4 = NULL, title, method = method, taxa.label = "Species"){
+  phylo.temp <- prune_samples(x = phyloseq.object,samples = data[,which(colnames(data) == ID.col)]) #subset phyloseq.object
+  phylo.temp  = filter_taxa(phylo.temp , function(x) mean(x) > 0, TRUE)
+  
+  data$order <- paste(data[,which(colnames(data) == order1)], #make ordering column 
+                      data[,which(colnames(data) == order2)],
+                      data[,which(colnames(data) == order3)],
+                      data[,which(colnames(data) == order4)])
+  
+  data <- data[match(sample_data(phylo.temp)$sample.ID,data$sample.ID),]
+  
+  sample_data(phylo.temp)$grouping <- data$order
+  
+  data <- data[order(data$order),] # order data
+  
+ plot <- plot_heatmap(phylo.temp,sample.order = data[,which(colnames(data) == ID.col)],sample.label = "grouping", method = method,taxa.label=taxa.label,title=title)
+
+print(plot)
+}
+
+
+phylo.heat.loop <- function(phyloseq.object.list = phylo.list, data, ID.col = "sample.ID", order1 = NULL, order2 = NULL, order3 = NULL, order4 = NULL, title, method = method, taxa.label.list = label.list){
+  
+  for(i in 1:length(phyloseq.object.list )){
+  
+    phyloseq.object <- phyloseq.object.list[[i]]
+    taxa.label <- taxa.label.list[[i]]
+    
+    data.i <- data
+    
+    phylo.temp <- prune_samples(x = phyloseq.object,samples = data.i[,which(colnames(data.i) == ID.col)]) #subset phyloseq.object
+    phylo.temp  = filter_taxa(phylo.temp , function(x) mean(x) > 0, TRUE)
+    
+    data.i$order <- paste(data.i[,which(colnames(data.i) == order1)], #make ordering column 
+                        data.i[,which(colnames(data.i) == order2)],
+                        data.i[,which(colnames(data.i) == order3)],
+                        data.i[,which(colnames(data.i) == order4)])
+    
+    data.i <- data.i[match(sample_data(phylo.temp)$sample.ID,data.i$sample.ID),]
+    
+    sample_data(phylo.temp)$grouping <- data.i$order
+    
+    data.i <- data.i[order(data.i$order),] # order data.i
+    
+   plot <- plot_heatmap(phylo.temp,sample.order = data.i[,which(colnames(data.i) == ID.col)],sample.label = "grouping", method =   method,taxa.label=taxa.label,title=paste(title,gsub(" ","",paste("(",taxa.label,")"))))
+    print(plot)}
+}
+```
+
+
+### Venn diagrams
+
+* Function to make categories for venn diagrams
+* Takes a data frame (not a matrix) where each column is a group (e.g. study site) and each row is a thing that was counted (e.g. species)
+* Data should be numeric with either 0 or NA for absent and any numeric value (other than 0) for present
+* It outputs either a list or vector with the results
+* Only handles up to 4 categories
+* x = your data frame
+* make.vector = if you want to output the results in my venn.quad function, use this
+* return.unique = 
+  *  if T then it will only return counts for unique combinations (e.g., if a species [row] is present in columns 1, 2, and 3, then it will be counted for the 1&2&3 category, but not for 1&2 or 1&3 or 2&3 or 1, etc.)
+  *  if F then it returns the total count for each category, even if that results in counting the same data point twice (e.g., a species present in columns 1 and 2 will be counted for column 1, for column 2, and for the 1&2 category)
+  *  set to false if you plan on using functions from VennDiagram
+```{r}
+venn.cat <- function(x,make.vector = F,return.unique=F){
+  if(is.matrix(x)==T){print("Error: x must be a data frame")
+    break}
+  x[is.na(x)==T] <- 0
+  x[x!=0] <- 1
+  
+  if(ncol(x)==2){
+    cnames <- colnames(x)
+    colnames(x)[1] <- "V1"
+    colnames(x)[2] <- "V2"
+    area1 = nrow(x[x$V1 == 1,])
+    area2 = nrow(x[x$V2 == 1,])
+    n12 = nrow(x[x$V1 == 1 & x$V2 == 1,])
+    if(return.unique == T){
+      area1 <- area1-n12
+      area2 <- area2-n12}
+    result <- cbind.data.frame(area1,area2,n12)
+    colnames(result) <- c(cnames[1],cnames[2],gsub(" ","",paste(cnames[1],"&",cnames[2])))
+    if(make.vector ==T){result <- as.numeric(result)}}
+  if(ncol(x)==3){
+    cnames <- colnames(x)
+    colnames(x)[1] <- "V1"
+    colnames(x)[2] <- "V2"
+    colnames(x)[3] <- "V3"
+    area1 = nrow(x[x$V1 == 1,])
+    area2 = nrow(x[x$V2 == 1,])
+    area3 = nrow(x[x$V3 == 1,])
+    n12 = nrow(x[x$V1 == 1 & x$V2 == 1,])
+    n13 = nrow(x[x$V1 == 1 & x$V3 == 1,])
+    n23 = nrow(x[x$V2 == 1 & x$V3 == 1,])
+    n123 = nrow(x[x$V1 == 1 & x$V2 == 1 & x$V3 == 1 ,])
+    if(return.unique == T){
+      n12 <- n12-n123
+      n13 <- n13-n123
+      n23 <- n23-n123
+      area1 <- area1-(n12+n13+n123)
+      area2 <- area2-(n12+n23+n123)
+      area3 <- area3-(n13+n23+n123)     }
+      result <- cbind.data.frame(area1,area2,area3,n12,n13,n23,n123)
+      colnames(result) <- c(cnames[1],cnames[2],cnames[3],gsub(" ","",paste(cnames[1],"&",cnames[2])),gsub(" ","",paste(cnames[1],"&",cnames[3])),gsub(" ","",paste(cnames[2],"&",cnames[3])),gsub(" ","",paste(cnames[1],"&",cnames[2],"&",cnames[3])))
+      if(make.vector ==T){result <- as.numeric(result)}}
+  if(ncol(x)==4){
+    cnames <- colnames(x)
+    colnames(x)[1] <- "V1"
+    colnames(x)[2] <- "V2"
+    colnames(x)[3] <- "V3"
+    colnames(x)[4] <- "V4"
+    area1 = nrow(x[x$V1 == 1,])
+    area2 = nrow(x[x$V2 == 1,])
+    area3 = nrow(x[x$V3 == 1,])
+    area4 = nrow(x[x$V4 == 1,])
+    n12 = nrow(x[x$V1 == 1 & x$V2 == 1,])
+    n13 = nrow(x[x$V1 == 1 & x$V3 == 1,])
+    n14 = nrow(x[x$V1 == 1 & x$V4 == 1,])
+    n23 = nrow(x[x$V2 == 1 & x$V3 == 1,])
+    n24 = nrow(x[x$V2 == 1 & x$V4 == 1,])
+    n34 = nrow(x[x$V3 == 1 & x$V4 == 1,])
+    n123 = nrow(x[x$V1 == 1 & x$V2 == 1 & x$V3 == 1 ,])
+    n124 = nrow(x[x$V1 == 1 & x$V2 == 1 & x$V4 == 1 ,])
+    n134 = nrow(x[x$V1 == 1 & x$V3 == 1 & x$V4 == 1 ,])
+    n234 = nrow(x[x$V2 == 1 & x$V3 == 1 & x$V4 == 1 ,])
+    n1234 = nrow(x[x$V1 == 1 & x$V2 == 1 & x$V3 == 1 & x$V4 == 1 ,])
+    if(return.unique == T){
+      n123 <- n123-n1234
+      n124 <- n124-n1234
+      n234 <- n234-n1234
+      n134 <- n134-n1234
+      n12 <- n12-(n123+n124+n1234)
+      n13 <- n13-(n123+n134+n1234)
+      n14 <- n14-(n124+n134+n1234)
+      n23 <- n23-(n123+n234+n1234)
+      n24 <- n24-(n124+n234+n1234)
+      n34 <- n34-(n134+n234+n1234)
+      area1 <- area1-(n12+n13+n14+n123+n124+n134+n1234)
+      area2 <- area2-(n12+n23+n24+n123+n124+n234+n1234)
+      area3 <- area3-(n13+n23+n34+n123+n134+n234+n1234)     
+      area4 <- area4-(n14+n24+n34+n124+n134+n234+n1234)     }
+      result <- cbind.data.frame(area1,area2,area3,area4,n12,n13,n14,n23,n24,n34,n123,n124,n134,n234,n1234)
+      colnames(result) <- c(cnames[1],cnames[2],cnames[3],cnames[4],gsub(" ","",paste(cnames[1],"&",cnames[2])),gsub(" ","",paste(cnames[1],"&",cnames[3])),gsub(" ","",paste(cnames[1],"&",cnames[4])),gsub(" ","",paste(cnames[2],"&",cnames[3])),gsub(" ","",paste(cnames[2],"&",cnames[4])),gsub(" ","",paste(cnames[3],"&",cnames[4])),gsub(" ","",paste(cnames[1],"&",cnames[2],"&",cnames[3])),gsub(" ","",paste(cnames[1],"&",cnames[2],"&",cnames[4])),gsub(" ","",paste(cnames[1],"&",cnames[3],"&",cnames[4])),gsub(" ","",paste(cnames[2],"&",cnames[3],"&",cnames[4])),gsub(" ","",paste(cnames[1],"&",cnames[2],"&",cnames[3],"&",cnames[4])))
+      if(make.vector ==T){result <- as.numeric(result)}}
+  if(return.unique==T){print("Only unique counts per category are returned")}
+  result
+  }
+```
+
+* Function to draw venn diagram
+* Exact same things as the draw.quad.venn function in the VennDiagram package (which may need to be loaded), but it takes a single vector (data) rather than having to enter all 15 positions separately (order still has to be the same as the order of the original function)
+* It wants totals, not unique counts (e.g., for a simple case of two categories with 3 individuals only in C1, two only in C2, and 4 in C1 and C2, you enter c(7, 6, 4))
+* Like the original function, it is makes a 4 way venn diagram
+* Category names should be entered in the same order as the column order input into venn.cat
+
+```{r}
+venn.quad <- function (data, category = rep("", 4), 
+          lwd = rep(2, 4), lty = rep("solid", 4), col = rep("black", 
+                                                            4), fill = NULL, alpha = rep(0.5, 4), label.col = rep("black", 
+                                                                                                                  15), cex = rep(1, 15), fontface = rep("plain", 15), fontfamily = rep("serif", 
+                                                                                                                                                                                       15), cat.pos = c(-15, 15, 0, 0), cat.dist = c(0.22, 0.22, 
+                                                                                                                                                                                                                                     0.11, 0.11), cat.col = rep("black", 4), cat.cex = rep(1, 
+                                                                                                                                                                                                                                                                                           4), cat.fontface = rep("plain", 4), cat.fontfamily = rep("serif", 
+                                                                                                                                                                                                                                                                                                                                                    4), cat.just = rep(list(c(0.5, 0.5)), 4), rotation.degree = 0, 
+          rotation.centre = c(0.5, 0.5), ind = TRUE, cex.prop = NULL, 
+          print.mode = "raw", sigdigs = 3, direct.area = FALSE, area.vector = 0, 
+          ...) 
+{
+ area1 <- data[1]
+ area2 <- data[2]
+ area3 <- data[3]
+ area4 <- data[4]
+ n12 <- data[5]
+ n13 <- data[6]
+ n14 <- data[7]
+ n23 <- data[8]
+ n24 <- data[9]
+ n34 <- data[10]
+ n123 <- data[11]
+ n124 <- data[12]
+ n134 <- data[13]
+ n234 <- data[14]
+ n1234 <- data[15]
+  
+ if (length(category) == 1) {
+    cat <- rep(category, 4)
+  }  else if (length(category) != 4) {
+    flog.error("Unexpected parameter length for 'category'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'category'")
+  }
+  if (length(lwd) == 1) {
+    lwd <- rep(lwd, 4)
+  }  else if (length(lwd) != 4) {
+    flog.error("Unexpected parameter length for 'lwd'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'lwd'")
+  }
+  if (length(lty) == 1) {
+    lty <- rep(lty, 4)
+  }  else if (length(lty) != 4) {
+    flog.error("Unexpected parameter length for 'lty'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'lty'")
+  }
+  if (length(col) == 1) {
+    col <- rep(col, 4)
+  }  else if (length(col) != 4) {
+    flog.error("Unexpected parameter length for 'col'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'col'")
+  }
+  if (length(label.col) == 1) {
+    label.col <- rep(label.col, 15)
+  }  else if (length(label.col) != 15) {
+    flog.error("Unexpected parameter length for 'label.col'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'label.col'")
+  }
+  if (length(cex) == 1) {
+    cex <- rep(cex, 15)
+  }  else if (length(cex) != 15) {
+    flog.error("Unexpected parameter length for 'cex'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cex'")
+  }
+  if (length(fontface) == 1) {
+    fontface <- rep(fontface, 15)
+  }  else if (length(fontface) != 15) {
+    flog.error("Unexpected parameter length for 'fontface'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'fontface'")
+  }
+  if (length(fontfamily) == 1) {
+    fontfamily <- rep(fontfamily, 15)
+  }  else if (length(fontfamily) != 15) {
+    flog.error("Unexpected parameter length for 'fontfamily'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'fontfamily'")
+  }
+  if (length(fill) == 1) {
+    fill <- rep(fill, 4)
+  }  else if (length(fill) != 4 & length(fill) != 0) {
+    flog.error("Unexpected parameter length for 'fill'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'fill'")
+  }
+  if (length(alpha) == 1) {
+    alpha <- rep(alpha, 4)
+  }  else if (length(alpha) != 4 & length(alpha) != 0) {
+    flog.error("Unexpected parameter length for 'alpha'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'alpha'")
+  }
+  if (length(cat.pos) == 1) {
+    cat.pos <- rep(cat.pos, 4)
+  }  else if (length(cat.pos) != 4) {
+    flog.error("Unexpected parameter length for 'cat.pos'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.pos'")
+  }
+  if (length(cat.dist) == 1) {
+    cat.dist <- rep(cat.dist, 4)
+  }  else if (length(cat.dist) != 4) {
+    flog.error("Unexpected parameter length for 'cat.dist'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.dist'")
+  }
+  if (length(cat.col) == 1) {
+    cat.col <- rep(cat.col, 4)
+  }  else if (length(cat.col) != 4) {
+    flog.error("Unexpected parameter length for 'cat.col'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.col'")
+  }
+  if (length(cat.cex) == 1) {
+    cat.cex <- rep(cat.cex, 4)
+  }  else if (length(cat.cex) != 4) {
+    flog.error("Unexpected parameter length for 'cat.cex'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.cex'")
+  }
+  if (length(cat.fontface) == 1) {
+    cat.fontface <- rep(cat.fontface, 4)
+  }  else if (length(cat.fontface) != 4) {
+    flog.error("Unexpected parameter length for 'cat.fontface'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.fontface'")
+  }
+  if (length(cat.fontfamily) == 1) {
+    cat.fontfamily <- rep(cat.fontfamily, 4)
+  }  else if (length(cat.fontfamily) != 4) {
+    flog.error("Unexpected parameter length for 'cat.fontfamily'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.fontfamily'")
+  }
+  if (!(class(cat.just) == "list" & length(cat.just) == 4 & 
+        length(cat.just[[1]]) == 2 & length(cat.just[[2]]) == 
+        2 & length(cat.just[[3]]) == 2 & length(cat.just[[4]]) == 
+        2)) {
+    flog.error("Unexpected parameter format for 'cat.just'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter format for 'cat.just'")
+  }
+  cat.pos <- cat.pos + rotation.degree
+  if (direct.area) {
+    areas <- area.vector
+    for (i in 1:15) {
+      assign(paste("a", i, sep = ""), area.vector[i])
+    }
+  }  else {
+    a6 <- n1234
+    a12 <- n123 - a6
+    a11 <- n124 - a6
+    a5 <- n134 - a6
+    a7 <- n234 - a6
+    a15 <- n12 - a6 - a11 - a12
+    a4 <- n13 - a6 - a5 - a12
+    a10 <- n14 - a6 - a5 - a11
+    a13 <- n23 - a6 - a7 - a12
+    a8 <- n24 - a6 - a7 - a11
+    a2 <- n34 - a6 - a5 - a7
+    a9 <- area1 - a4 - a5 - a6 - a10 - a11 - a12 - a15
+    a14 <- area2 - a6 - a7 - a8 - a11 - a12 - a13 - a15
+    a1 <- area3 - a2 - a4 - a5 - a6 - a7 - a12 - a13
+    a3 <- area4 - a2 - a5 - a6 - a7 - a8 - a10 - a11
+    areas <- c(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, 
+               a12, a13, a14, a15)
+  }
+  areas.error <- c("a1  <- area3 - a2 - a4 - a5 - a6 - a7 - a12 - a13", 
+                   "a2  <- n34 - a6 - a5 - a7", "a3  <- area4 - a2 - a5 - a6 - a7 - a8 - a10 - a11", 
+                   "a4  <- n13 - a6 - a5 - a12", "a5  <- n134 - a6", "a6  <- n1234", 
+                   "a7  <- n234 - a6", "a8  <- n24 - a6 - a7 - a11", "a9  <- area1 - a4 - a5 - a6 - a10 - a11 - a12 - a15", 
+                   "a10 <- n14 - a6 - a5 - a11", "a11 <- n124 - a6", "a12 <- n123 - a6", 
+                   "a15 <- n12 - a6 - a11 - a12", "a13 <- n23 - a6 - a7 - a12", 
+                   "a14 <- area2 - a6 - a7 - a8 - a11 - a12 - a13 - a15")
+  for (i in 1:length(areas)) {
+    if (areas[i] < 0) {
+      flog.error(paste("Impossible:", areas.error[i], "produces negative area"), 
+                 name = "VennDiagramLogger")
+      stop(paste("Impossible:", areas.error[i], "produces negative area"))
+    }
+  }
+  if (length(cex.prop) > 0) {
+    if (length(cex.prop) != 1) {
+      flog.error("Value passed to cex.prop is not length 1", 
+                 name = "VennDiagramLogger")
+      stop("Value passed to cex.prop is not length 1")
+    }
+    func = cex.prop
+    if (class(cex.prop) != "function") {
+      if (cex.prop == "lin") {
+        func = function(x) x
+      }      else if (cex.prop == "log10") {
+        func = log10
+      }      else flog.error(paste0("Unknown value passed to cex.prop: ", 
+                             cex.prop), name = "VennDiagramLogger")
+      stop(paste0("Unknown value passed to cex.prop: ", 
+                  cex.prop))
+    }
+    maxArea = max(areas)
+    for (i in 1:length(areas)) {
+      cex[i] = cex[i] * func(areas[i])/func(maxArea)
+      if (cex[i] <= 0) 
+        stop(paste0("Error in rescaling of area labels: the label of area ", 
+                    i, " is less than or equal to zero"))
+    }
+  }
+  grob.list <- gList()
+  ellipse.positions <- matrix(nrow = 4, ncol = 7)
+  colnames(ellipse.positions) <- c("x", "y", "a", "b", "rotation", 
+                                   "fill.mapping", "line.mapping")
+  ellipse.positions[1, ] <- c(0.65, 0.47, 0.35, 0.2, 45, 2, 
+                              2)
+  ellipse.positions[2, ] <- c(0.35, 0.47, 0.35, 0.2, 135, 1, 
+                              1)
+  ellipse.positions[3, ] <- c(0.5, 0.57, 0.33, 0.15, 45, 4, 
+                              4)
+  ellipse.positions[4, ] <- c(0.5, 0.57, 0.35, 0.15, 135, 3, 
+                              3)
+  for (i in 1:4) {
+    grob.list <- gList(grob.list, VennDiagram::ellipse(x = ellipse.positions[i, 
+                                                                             "x"], y = ellipse.positions[i, "y"], a = ellipse.positions[i, 
+                                                                                                                                        "a"], b = ellipse.positions[i, "b"], rotation = ellipse.positions[i, 
+                                                                                                                                                                                                          "rotation"], gp = gpar(lty = 0, fill = fill[ellipse.positions[i, 
+                                                                                                                                                                                                                                                                        "fill.mapping"]], alpha = alpha[ellipse.positions[i, 
+                                                                                                                                                                                                                                                                                                                          "fill.mapping"]])))
+  }
+  for (i in 1:4) {
+    grob.list <- gList(grob.list, ellipse(x = ellipse.positions[i, 
+                                                                "x"], y = ellipse.positions[i, "y"], a = ellipse.positions[i, 
+                                                                                                                           "a"], b = ellipse.positions[i, "b"], rotation = ellipse.positions[i, 
+                                                                                                                                                                                             "rotation"], gp = gpar(lwd = lwd[ellipse.positions[i, 
+                                                                                                                                                                                                                                                "line.mapping"]], lty = lty[ellipse.positions[i, 
+                                                                                                                                                                                                                                                                                              "line.mapping"]], col = col[ellipse.positions[i, 
+                                                                                                                                                                                                                                                                                                                                            "line.mapping"]], fill = "transparent")))
+  }
+  label.matrix <- matrix(nrow = 15, ncol = 3)
+  colnames(label.matrix) <- c("label", "x", "y")
+  label.matrix[1, ] <- c(a1, 0.35, 0.77)
+  label.matrix[2, ] <- c(a2, 0.5, 0.69)
+  label.matrix[3, ] <- c(a3, 0.65, 0.77)
+  label.matrix[4, ] <- c(a4, 0.31, 0.67)
+  label.matrix[5, ] <- c(a5, 0.4, 0.58)
+  label.matrix[6, ] <- c(a6, 0.5, 0.47)
+  label.matrix[7, ] <- c(a7, 0.6, 0.58)
+  label.matrix[8, ] <- c(a8, 0.69, 0.67)
+  label.matrix[9, ] <- c(a9, 0.18, 0.58)
+  label.matrix[10, ] <- c(a10, 0.32, 0.42)
+  label.matrix[11, ] <- c(a11, 0.425, 0.38)
+  label.matrix[12, ] <- c(a12, 0.575, 0.38)
+  label.matrix[13, ] <- c(a13, 0.68, 0.42)
+  label.matrix[14, ] <- c(a14, 0.82, 0.58)
+  label.matrix[15, ] <- c(a15, 0.5, 0.28)
+  processedLabels <- rep("", length(label.matrix[, "label"]))
+  if (print.mode[1] == "percent") {
+    processedLabels <- paste(signif(label.matrix[, "label"]/sum(label.matrix[, 
+                                                                             "label"]) * 100, digits = sigdigs), "%", sep = "")
+    if (isTRUE(print.mode[2] == "raw")) {
+      processedLabels <- paste(processedLabels, "\\n(", 
+                               label.matrix[, "label"], ")", sep = "")
+    }
+  }
+  if (print.mode[1] == "raw") {
+    processedLabels <- label.matrix[, "label"]
+    if (isTRUE(print.mode[2] == "percent")) {
+      processedLabels <- paste(processedLabels, "\\n(", 
+                               paste(signif(label.matrix[, "label"]/sum(label.matrix[, 
+                                                                                     "label"]) * 100, digits = sigdigs), "%)", sep = ""), 
+                               sep = "")
+    }
+  }
+  for (i in 1:nrow(label.matrix)) {
+    grob.list <- gList(grob.list, textGrob(label = processedLabels[i], 
+                                           x = label.matrix[i, "x"], y = label.matrix[i, "y"], 
+                                           gp = gpar(col = label.col[i], cex = cex[i], fontface = fontface[i], 
+                                                     fontfamily = fontfamily[i])))
+  }
+  cat.pos.x <- c(0.18, 0.82, 0.35, 0.65)
+  cat.pos.y <- c(0.58, 0.58, 0.77, 0.77)
+  for (i in 1:4) {
+    this.cat.pos <- find.cat.pos(x = cat.pos.x[i], y = cat.pos.y[i], 
+                                 pos = cat.pos[i], dist = cat.dist[i])
+    grob.list <- gList(grob.list, textGrob(label = category[i], 
+                                           x = this.cat.pos$x, y = this.cat.pos$y, just = cat.just[[i]], 
+                                           gp = gpar(col = cat.col[i], cex = cat.cex[i], fontface = cat.fontface[i], 
+                                                     fontfamily = cat.fontfamily[i])))
+  }
+  grob.list <- VennDiagram::adjust.venn(VennDiagram::rotate.venn.degrees(grob.list, 
+                                                                         rotation.degree, rotation.centre[1], rotation.centre[2]), 
+                                        ...)
+  if (ind) {
+    grid.draw(grob.list)
+  }
+  return(grob.list)
+}
+
+venn.trip <- function(data, category = rep("", 
+                                                                   3), rotation = 1, reverse = FALSE, euler.d = TRUE, scaled = TRUE, 
+          lwd = rep(2, 3), lty = rep("solid", 3), col = rep("black", 
+                                                            3), fill = NULL, alpha = rep(0.5, 3), label.col = rep("black", 
+                                                                                                                  7), cex = rep(1, 7), fontface = rep("plain", 7), fontfamily = rep("serif", 
+                                                                                                                                                                                    7), cat.pos = c(-40, 40, 180), cat.dist = c(0.05, 0.05, 
+                                                                                                                                                                                                                                0.025), cat.col = rep("black", 3), cat.cex = rep(1, 3), 
+          cat.fontface = rep("plain", 3), cat.fontfamily = rep("serif", 
+                                                               3), cat.just = list(c(0.5, 1), c(0.5, 1), c(0.5, 0)), 
+          cat.default.pos = "outer", cat.prompts = FALSE, rotation.degree = 0, 
+          rotation.centre = c(0.5, 0.5), ind = TRUE, sep.dist = 0.05, 
+          offset = 0, cex.prop = NULL, print.mode = "raw", sigdigs = 3, 
+          direct.area = FALSE, area.vector = 0, ...) 
+{
+  area1 <- data[1]
+  area2 <- data[2]
+  area3 <- data[3]
+  n12 <- data[4]
+  n13 <- data[5]
+  n23 <- data[6]
+  n123 <- data[7]
+
+  
+  
+  if (length(category) == 1) {
+    cat <- rep(category, 3)
+  }
+  else if (length(category) != 3) {
+    flog.error("Unexpected parameter length for 'category'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'category'")
+  }
+  if (length(lwd) == 1) {
+    lwd <- rep(lwd, 3)
+  }
+  else if (length(lwd) != 3) {
+    flog.error("Unexpected parameter length for 'lwd'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'lwd'")
+  }
+  if (length(lty) == 1) {
+    lty <- rep(lty, 3)
+  }
+  else if (length(lty) != 3) {
+    flog.error("Unexpected parameter length for 'lty'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'lty'")
+  }
+  if (length(col) == 1) {
+    col <- rep(col, 3)
+  }
+  else if (length(col) != 3) {
+    flog.error("Unexpected parameter length for 'col'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'col'")
+  }
+  if (length(label.col) == 1) {
+    label.col <- rep(label.col, 7)
+  }
+  else if (length(label.col) != 7) {
+    flog.error("Unexpected parameter length for 'label.col'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'label.col'")
+  }
+  if (length(cex) == 1) {
+    cex <- rep(cex, 7)
+  }
+  else if (length(cex) != 7) {
+    flog.error("Unexpected parameter length for 'cex'", name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cex'")
+  }
+  if (length(fontface) == 1) {
+    fontface <- rep(fontface, 7)
+  }
+  else if (length(fontface) != 7) {
+    flog.error("Unexpected parameter length for 'fontface'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'fontface'")
+  }
+  if (length(fontfamily) == 1) {
+    fontfamily <- rep(fontfamily, 7)
+  }
+  else if (length(fontfamily) != 7) {
+    flog.error("Unexpected parameter length for 'fontfamily'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'fontfamily'")
+  }
+  if (length(fill) == 1) {
+    fill <- rep(fill, 3)
+  }
+  else if (length(fill) != 3 & length(fill) != 0) {
+    flog.error("Unexpected parameter length for 'fill'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'fill'")
+  }
+  if (length(alpha) == 1) {
+    alpha <- rep(alpha, 3)
+  }
+  else if (length(alpha) != 3 & length(alpha) != 0) {
+    flog.error("Unexpected parameter length for 'alpha'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'alpha'")
+  }
+  if (length(cat.pos) == 1) {
+    cat.pos <- rep(cat.pos, 3)
+  }
+  else if (length(cat.pos) != 3) {
+    flog.error("Unexpected parameter length for 'cat.pos'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.pos'")
+  }
+  if (length(cat.dist) == 1) {
+    cat.dist <- rep(cat.dist, 3)
+  }
+  else if (length(cat.dist) != 3) {
+    flog.error("Unexpected parameter length for 'cat.dist'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.dist'")
+  }
+  if (length(cat.col) == 1) {
+    cat.col <- rep(cat.col, 3)
+  }
+  else if (length(cat.col) != 3) {
+    flog.error("Unexpected parameter length for 'cat.col'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.col'")
+  }
+  if (length(cat.cex) == 1) {
+    cat.cex <- rep(cat.cex, 3)
+  }
+  else if (length(cat.cex) != 3) {
+    flog.error("Unexpected parameter length for 'cat.cex'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.cex'")
+  }
+  if (length(cat.fontface) == 1) {
+    cat.fontface <- rep(cat.fontface, 3)
+  }
+  else if (length(cat.fontface) != 3) {
+    flog.error("Unexpected parameter length for 'cat.fontface'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.fontface'")
+  }
+  if (length(cat.fontfamily) == 1) {
+    cat.fontfamily <- rep(cat.fontfamily, 3)
+  }
+  else if (length(cat.fontfamily) != 3) {
+    flog.error("Unexpected parameter length for 'cat.fontfamily'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter length for 'cat.fontfamily'")
+  }
+  if (!(class(cat.just) == "list" & length(cat.just) == 3)) {
+    flog.error("Unexpected parameter format for 'cat.just'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter format for 'cat.just'")
+  }
+  else if (!(length(cat.just[[1]]) == 2 & length(cat.just[[2]]) == 
+             2 & length(cat.just[[3]]) == 2)) {
+    flog.error("Unexpected parameter format for 'cat.just'", 
+               name = "VennDiagramLogger")
+    stop("Unexpected parameter format for 'cat.just'")
+  }
+  if (euler.d == FALSE & scaled == TRUE) {
+    flog.error("Uninterpretable parameter combination\\nPlease set both euler.d = FALSE and scaled = FALSE to force Venn diagrams.", 
+               name = "VennDiagramLogger")
+    stop("Uninterpretable parameter combination\\nPlease set both euler.d = FALSE and scaled = FALSE to force Venn diagrams.")
+  }
+  if (offset > 1 | offset < 0) {
+    flog.error("'Offset' must be between 0 and 1.  Try using 'rotation.degree = 180' to achieve offsets in the opposite direction.", 
+               name = "VennDiagramLogger")
+    stop("'Offset' must be between 0 and 1.  Try using 'rotation.degree = 180' to achieve offsets in the opposite direction.")
+  }
+  cat.pos <- cat.pos + rotation.degree
+  if (direct.area) {
+    areas <- area.vector
+    for (i in 1:7) {
+      assign(paste("a", i, sep = ""), area.vector[i])
+    }
+  }
+  else {
+    a1 <- area1 - n12 - n13 + n123
+    a2 <- n12 - n123
+    a3 <- area2 - n12 - n23 + n123
+    a4 <- n13 - n123
+    a5 <- n123
+    a6 <- n23 - n123
+    a7 <- area3 - n13 - n23 + n123
+    areas <- c(a1, a2, a3, a4, a5, a6, a7)
+  }
+  if (euler.d) {
+    special.code <- VennDiagram::decide.special.case(areas)
+    if (special.code %in% c("121AO", "100", "033", "011A", 
+                            "021AA", "022AAOO", "011O", "112AA", "122AAOO", "010", 
+                            "110", "130", "001", "012AA", "120", "022AAAO", "032", 
+                            "111A", "023")) {
+      if (special.code %in% c("022AAAO", "022AAOO", "023", 
+                              "032", "120", "121AO", "122AAOO", "130")) {
+        f1 <- VennDiagram::draw.sp.case.scaled
+      }
+      else {
+        f1 <- VennDiagram::draw.sp.case.preprocess
+      }
+      rst <- f1(sp.case.name = special.code, a1 = areas[1], 
+                a2 = areas[2], a3 = areas[3], a4 = areas[4], 
+                a5 = areas[5], a6 = areas[6], a7 = areas[7], 
+                category = category, reverse = reverse, cat.default.pos = cat.default.pos, 
+                lwd = lwd, lty = lty, col = col, label.col = label.col, 
+                cex = cex, fontface = fontface, fontfamily = fontfamily, 
+                cat.pos = cat.pos, cat.dist = cat.dist, cat.col = cat.col, 
+                cat.cex = cat.cex, cat.fontface = cat.fontface, 
+                cat.fontfamily = cat.fontfamily, cat.just = cat.just, 
+                cat.prompts = cat.prompts, fill = fill, alpha = alpha, 
+                print.mode = print.mode, sigdigs = sigdigs, ...)
+      rst <- VennDiagram::adjust.venn(VennDiagram::rotate.venn.degrees(gList1 = rst, 
+                                                                       angle = rotation.degree, x.centre = rotation.centre[1], 
+                                                                       y.centre = rotation.centre[2]), ...)
+      if (ind) {
+        grid.draw(rst)
+      }
+      return(rst)
+    }
+  }
+  rotated <- VennDiagram::rotate(areas, category, lwd, lty, 
+                                 col, label.col, cex, fontface, fontfamily, cat.col, cat.cex, 
+                                 cat.fontface, cat.fontfamily, alpha, rotation, reverse, 
+                                 fill)
+  for (i in 1:length(areas)) {
+    areas[i] <- rotated[[1]][i]
+  }
+  category <- rotated[[2]]
+  lwd <- rotated$lwd
+  lty <- rotated$lty
+  col <- rotated$col
+  label.col <- rotated$label.col
+  cex <- rotated$cex
+  fontface <- rotated$fontface
+  fontfamily <- rotated$fontfamily
+  cat.col <- rotated$cat.col
+  cat.cex <- rotated$cat.cex
+  cat.fontface <- rotated$cat.fontface
+  cat.fontfamily <- rotated$cat.fontfamily
+  fill <- rotated$fill
+  alpha <- rotated$alpha
+  areas.error <- c("a1 <- area1 - n12 - n13 + n123", "a2 <- n12 - n123", 
+                   "a3 <- area2 - n12 - n23 + n123", "a4 <- n13 - n123", 
+                   "a5 <- n123", "a6 <- n23 - n123", "a7 <- area3 - n13 - n23 + n123")
+  for (i in 1:length(areas)) {
+    if (areas[i] < 0) {
+      flog.error(paste("Impossible:", areas.error[i], "produces negative area"), 
+                 name = "VennDiagramLogger")
+      stop(paste("Impossible:", areas.error[i], "produces negative area"))
+    }
+  }
+  for (i in 1:length(areas)) {
+    if (areas[i]) {
+      scaled <- FALSE
+    }
+  }
+  is.defaults <- TRUE
+  if (is.expression(category)) {
+    is.defaults <- FALSE
+  }
+  if (all(cat.default.pos != "outer", cat.default.pos != "text", 
+          !is.defaults, cat.prompts)) {
+    flog.info("No default location recognized.  Automatically changing to 'outer'", 
+              name = "VennDiagramLogger")
+    cat.default.pos <- "outer"
+  }
+  if (all(cat.default.pos == "outer", !is.defaults, cat.prompts)) {
+    flog.info("Placing category labels at default outer locations.  Use 'cat.pos' and 'cat.dist' to modify location.", 
+              name = "VennDiagramLogger")
+    flog.info(paste("Current 'cat.pos':", cat.pos[1], "degrees,", 
+                    cat.pos[2], "degrees"), name = "VennDiagramLogger")
+    flog.info(paste("Current 'cat.dist':", cat.dist[1], ",", 
+                    cat.dist[2]), name = "VennDiagramLogger")
+  }
+  if (all(cat.default.pos == "text", !is.defaults, cat.prompts)) {
+    flog.info("Placing category labels at default text locations.  Use 'cat.pos' and 'cat.dist' to modify location.", 
+              name = "VennDiagramLogger")
+    flog.info(paste("Current 'cat.pos':", cat.pos[1], "degrees,", 
+                    cat.pos[2], "degrees"), name = "VennDiagramLogger")
+    flog.info(paste("Current 'cat.dist':", cat.dist[1], ",", 
+                    cat.dist[2]), name = "VennDiagramLogger")
+  }
+  grob.list <- gList()
+  if (!exists("overrideTriple")) {
+    r1 <- sqrt(100/pi)
+    r2 <- r1
+    r3 <- r1
+  }
+  else {
+    r1 <- sqrt(area1/pi)
+    r2 <- sqrt(area2/pi)
+    r3 <- sqrt(area3/pi)
+  }
+  max.circle.size = 0.2
+  shrink.factor <- max.circle.size/r1
+  r1 <- r1 * shrink.factor
+  r2 <- r2 * shrink.factor
+  r3 <- r3 * shrink.factor
+  if (!exists("overrideTriple")) {
+    a <- find.dist(100, 100, 40) * shrink.factor
+    b <- a
+    c <- a
+  }
+  else {
+    a <- find.dist(area1, area2, n12) * shrink.factor
+    b <- find.dist(area2, area3, n23) * shrink.factor
+    c <- find.dist(area1, area3, n13) * shrink.factor
+  }
+  x.centres <- vector(mode = "numeric", length = 3)
+  y.centres <- vector(mode = "numeric", length = 3)
+  beta <- (a^2 + c^2 - b^2)/(2 * a * c)
+  gamma <- sqrt(1 - beta^2)
+  x.centres[1] <- (r1 - r2 - a + 1)/2
+  x.centres[3] <- x.centres[1] + c * beta
+  y.centres[3] <- (r3 - r1 + 1 - c * gamma)/2
+  y.centres[1] <- y.centres[3] + c * gamma
+  x.centres[2] <- x.centres[1] + a
+  y.centres[2] <- y.centres[1]
+  radii <- c(r1, r2, r3)
+  for (i in 1:3) {
+    grob.list <- gList(grob.list, VennDiagram::ellipse(x = x.centres[i], 
+                                                       y = y.centres[i], a = radii[i], b = radii[i], gp = gpar(lty = 0, 
+                                                                                                               fill = fill[i], alpha = alpha[i])))
+  }
+  for (i in 1:3) {
+    grob.list <- gList(grob.list, VennDiagram::ellipse(x = x.centres[i], 
+                                                       y = y.centres[i], a = radii[i], b = radii[i], gp = gpar(lwd = lwd[i], 
+                                                                                                               lty = lty[i], col = col[i], fill = "transparent")))
+  }
+  new.x.centres <- vector(mode = "numeric", length = 3)
+  new.y.centres <- vector(mode = "numeric", length = 3)
+  cell.labels <- areas
+  cell.x <- vector(mode = "numeric", length = 7)
+  cell.y <- vector(mode = "numeric", length = 7)
+  x.cept.12 <- (r1^2 - r2^2 - x.centres[1]^2 + x.centres[2]^2)/(2 * 
+                                                                  (x.centres[2] - x.centres[1]))
+  y.cept.12.1 <- sqrt(r1^2 - (x.cept.12 - x.centres[1])^2) + 
+    y.centres[1]
+  y.cept.12.2 <- -sqrt(r1^2 - (x.cept.12 - x.centres[1])^2) + 
+    y.centres[1]
+  theta <- acos((a^2 + c^2 - b^2)/(2 * a * c))
+  new.x.centres[3] <- x.centres[1] + c
+  l.x.cept.13 <- (r1^2 - r3^2 - x.centres[1]^2 + new.x.centres[3]^2)/(2 * 
+                                                                        (new.x.centres[3] - x.centres[1]))
+  l.y.cept.13.1 <- sqrt(r1^2 - (l.x.cept.13 - x.centres[1])^2) + 
+    y.centres[1]
+  l.y.cept.13.2 <- -sqrt(r1^2 - (l.x.cept.13 - x.centres[1])^2) + 
+    y.centres[1]
+  rot <- sqrt(2 * r1^2 - 2 * r1^2 * cos(theta))
+  x.cept.13.1 <- l.x.cept.13 + rot * cos(pi/2 - atan((l.y.cept.13.1 - 
+                                                        y.centres[1])/(l.x.cept.13 - x.centres[1])) + theta/2)
+  x.cept.13.2 <- l.x.cept.13 + rot * cos(pi/2 - atan((l.y.cept.13.2 - 
+                                                        y.centres[1])/(l.x.cept.13 - x.centres[1])) + theta/2)
+  y.cept.13.1 <- l.y.cept.13.1 - rot * sin(pi/2 - atan((l.y.cept.13.1 - 
+                                                          y.centres[1])/(l.x.cept.13 - x.centres[1])) + theta/2)
+  y.cept.13.2 <- l.y.cept.13.2 - rot * sin(pi/2 - atan((l.y.cept.13.2 - 
+                                                          y.centres[1])/(l.x.cept.13 - x.centres[1])) + theta/2)
+  theta <- -acos((a^2 + b^2 - c^2)/(2 * a * b))
+  new.x.centres[3] <- x.centres[2] - b
+  l.x.cept.23 <- (r2^2 - r3^2 - x.centres[2]^2 + new.x.centres[3]^2)/(2 * 
+                                                                        (new.x.centres[3] - x.centres[2]))
+  l.y.cept.23.1 <- sqrt(r2^2 - (l.x.cept.23 - x.centres[2])^2) + 
+    y.centres[2]
+  l.y.cept.23.2 <- -sqrt(r2^2 - (l.x.cept.23 - x.centres[2])^2) + 
+    y.centres[2]
+  rot <- sqrt(2 * r2^2 - 2 * r2^2 * cos(theta))
+  x.cept.23.1 <- l.x.cept.23 + rot * cos(pi/2 - atan((y.centres[2] - 
+                                                        l.y.cept.23.1)/(x.centres[2] - l.x.cept.23)) + theta/2)
+  x.cept.23.2 <- l.x.cept.23 + rot * cos(pi/2 - atan((y.centres[2] - 
+                                                        l.y.cept.23.2)/(x.centres[2] - l.x.cept.23)) + theta/2)
+  y.cept.23.1 <- l.y.cept.23.1 - rot * sin(pi/2 - atan((y.centres[2] - 
+                                                          l.y.cept.23.1)/(x.centres[2] - l.x.cept.23)) + theta/2)
+  y.cept.23.2 <- l.y.cept.23.2 - rot * sin(pi/2 - atan((y.centres[2] - 
+                                                          l.y.cept.23.2)/(x.centres[2] - l.x.cept.23)) + theta/2)
+  m <- (y.cept.23.2 - y.cept.23.1)/(x.cept.23.2 - x.cept.23.1)
+  y.sect <- m * (x.cept.12 - x.cept.23.1) + y.cept.23.1
+  cell.x[5] <- x.cept.12
+  cell.y[5] <- y.sect
+  m <- (y.cept.13.2 - y.cept.13.1)/(x.cept.13.2 - x.cept.13.1)
+  y0 <- y.centres[2]
+  x0 <- x.centres[2]
+  b <- y.cept.13.1 - m * x.cept.13.1
+  x.sect <- (m * y0 + x0 - m * b)/(m^2 + 1) + sqrt(r2^2 - ((y0 - 
+                                                              m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  y.sect <- (m^2 * y0 + m * x0 + b)/(m^2 + 1) + m * sqrt(r2^2 - 
+                                                           ((y0 - m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  cell.x[3] <- (x.cept.13.1 + x.sect)/2
+  cell.y[3] <- (y.cept.13.1 + y.sect)/2
+  m <- (y.cept.23.2 - y.cept.23.1)/(x.cept.23.2 - x.cept.23.1)
+  y0 <- y.centres[1]
+  x0 <- x.centres[1]
+  b <- y.cept.23.1 - m * x.cept.23.1
+  x.sect <- (m * y0 + x0 - m * b)/(m^2 + 1) - sqrt(r1^2 - ((y0 - 
+                                                              m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  y.sect <- (m^2 * y0 + m * x0 + b)/(m^2 + 1) - m * sqrt(r1^2 - 
+                                                           ((y0 - m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  cell.x[1] <- (x.cept.23.1 + x.sect)/2
+  cell.y[1] <- (y.cept.23.1 + y.sect)/2
+  y.sect <- -sqrt(r3^2 - (x.cept.12 - x.centres[3])^2) + y.centres[3]
+  cell.x[7] <- x.cept.12
+  cell.y[7] <- (y.cept.12.2 + y.sect)/2
+  m <- (y.cept.23.2 - y.cept.23.1)/(x.cept.23.2 - x.cept.23.1)
+  y0 <- y.centres[1]
+  x0 <- x.centres[1]
+  b <- y.cept.23.1 - m * x.cept.23.1
+  x.sect <- (m * y0 + x0 - m * b)/(m^2 + 1) + sqrt(r1^2 - ((y0 - 
+                                                              m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  y.sect <- (m^2 * y0 + m * x0 + b)/(m^2 + 1) + m * sqrt(r1^2 - 
+                                                           ((y0 - m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  cell.x[6] <- (x.cept.23.2 + x.sect)/2
+  cell.y[6] <- (y.cept.23.2 + y.sect)/2
+  m <- (y.cept.13.2 - y.cept.13.1)/(x.cept.13.2 - x.cept.13.1)
+  y0 <- y.centres[2]
+  x0 <- x.centres[2]
+  b <- y.cept.13.1 - m * x.cept.13.1
+  x.sect <- (m * y0 + x0 - m * b)/(m^2 + 1) - sqrt(r2^2 - ((y0 - 
+                                                              m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  y.sect <- (m^2 * y0 + m * x0 + b)/(m^2 + 1) - m * sqrt(r2^2 - 
+                                                           ((y0 - m * x0 - b)/sqrt(1 + m^2))^2)/sqrt(1 + m^2)
+  cell.x[4] <- (x.cept.13.2 + x.sect)/2
+  cell.y[4] <- (y.cept.13.2 + y.sect)/2
+  y.sect <- sqrt(r3^2 - (x.cept.12 - x.centres[3])^2) + y.centres[3]
+  cell.x[2] <- x.cept.12
+  cell.y[2] <- (y.cept.12.1 + y.sect)/2
+  if (length(cex.prop) > 0) {
+    if (length(cex.prop) != 1) {
+      flog.error("Value passed to cex.prop is not length 1", 
+                 name = "VennDiagramLogger")
+      stop("Value passed to cex.prop is not length 1")
+    }
+    func = cex.prop
+    if (class(cex.prop) != "function") {
+      if (cex.prop == "lin") {
+        func = function(x) x
+      }
+      else if (cex.prop == "log10") {
+        func = log10
+      }
+      else flog.error(paste0("Unknown value passed to cex.prop: ", 
+                             cex.prop), name = "VennDiagramLogger")
+      stop(paste0("Unknown value passed to cex.prop: ", 
+                  cex.prop))
+    }
+    maxArea = max(areas)
+    for (i in 1:length(areas)) {
+      cex[i] = cex[i] * func(areas[i])/func(maxArea)
+      if (cex[i] <= 0) 
+        stop(paste0("Error in rescaling of area labels: the label of area ", 
+                    i, " is less than or equal to zero"))
+    }
+  }
+  processedLabels <- rep("", length(cell.labels))
+  if (print.mode[1] == "percent") {
+    processedLabels <- paste(signif(cell.labels/sum(cell.labels) * 
+                                      100, digits = sigdigs), "%", sep = "")
+    if (isTRUE(print.mode[2] == "raw")) {
+      processedLabels <- paste(processedLabels, "\\n(", 
+                               cell.labels, ")", sep = "")
+    }
+  }
+  if (print.mode[1] == "raw") {
+    processedLabels <- cell.labels
+    if (isTRUE(print.mode[2] == "percent")) {
+      processedLabels <- paste(processedLabels, "\\n(", 
+                               paste(signif(cell.labels/sum(cell.labels) * 100, 
+                                            digits = sigdigs), "%)", sep = ""), sep = "")
+    }
+  }
+  for (i in 1:7) {
+    grob.list <- gList(grob.list, textGrob(label = processedLabels[i], 
+                                           x = cell.x[i], y = cell.y[i], gp = gpar(col = label.col[i], 
+                                                                                   cex = cex[i], fontface = fontface[i], fontfamily = fontfamily[i])))
+  }
+  text.location.mapping <- c(1, 3, 7)
+  for (i in 1:3) {
+    if ("outer" == cat.default.pos) {
+      this.cat.pos <- find.cat.pos(x = x.centres[i], y = y.centres[i], 
+                                   pos = cat.pos[i], dist = cat.dist[i], r = radii[i])
+    }
+    else if ("text" == cat.default.pos) {
+      this.cat.pos <- find.cat.pos(x = cell.x[text.location.mapping[i]], 
+                                   y = cell.y[text.location.mapping[i]], pos = cat.pos[i], 
+                                   dist = cat.dist[i])
+    }
+    else {
+      flog.error("Invalid setting of cat.default.pos", 
+                 name = "VennDiagramLogger")
+      stop("Invalid setting of cat.default.pos")
+    }
+    grob.list <- gList(grob.list, textGrob(label = category[i], 
+                                           x = this.cat.pos$x, y = this.cat.pos$y, just = cat.just[[i]], 
+                                           gp = gpar(col = cat.col[i], cex = cat.cex[i], fontface = cat.fontface[i], 
+                                                     fontfamily = cat.fontfamily[i])))
+  }
+  grob.list <- VennDiagram::adjust.venn(VennDiagram::rotate.venn.degrees(gList1 = grob.list, 
+                                                                         angle = rotation.degree, x.centre = rotation.centre[1], 
+                                                                         y.centre = rotation.centre[2]), ...)
+  if (ind) {
+    grid.draw(grob.list)
+  }
+  return(grob.list)
+}
+
+```
+
+# Mock communities
+
+* Examine results of 3 Zymo Research mock bacterial communities that were extracted and sequenced alongside the actual samples
+
+```{r}
+mock <- read.csv("Supplemental mock.csv")
+
+ggplot(mock,aes(x=sample,y=proportion.of.reads,fill=species))+
+  geom_bar(position="stack", stat="identity")
+
+```
+
+# Broad beta and alpha diversity patterns
+
+* This section contains plots looking at broad patterns
+* The data are still pseudoreplicated, and we cannot run rigorous statistics at this level, but it provides a good visual overview
+
+## PCoAs
+
+* Ordination plots based on different dissimilarity measures
+* Results are shown both at the ASV and the Family level
+* The ASV plot based on Bray-Curtis was included in the manuscript
+
+```{r}
+#order metadata to match the distance objects
+meta <- meta[match(colnames(as.matrix(dists[[1]])),meta$sample.ID),]
+
+for(i in 1:length(dists)){
+
+  meta.i <- meta
+  pcoa <- cmdscale(dists[[i]],k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+ plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(shape=location.general,fill=sample.type,stroke=1),color = "black",size=4)+
+    scale_shape_manual(values=c(21, 22,24,25))+
+    scale_fill_manual(values = c("#cc3a47",rgb(1, 0.7921569, 0.1568627),rgb(0.0078, 0.4392, 0.7490)))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    guides(fill=guide_legend(override.aes=list(colour=c(cloaca = "#cc3a47",plastron = rgb(1, 0.7921569, 0.1568627),water = rgb(0.0078, 0.4392, 0.7490)))))+
+    ggtitle(paste(names(dists)[i],"(broad patterns)"))
+ 
+ print(plot)
+ 
+}
+
+```
+
+## Alpha diversity boxplots
+
+* These plots are included in manuscript
+
+```{r}
+ggplot(meta,aes(x=type.location.gen.water.type,y=rich,fill=sample.type))+
+  geom_boxplot()+
+  scale_fill_manual(values = c("#cc3a47",rgb(1, 0.7921569, 0.1568627),rgb(0.0078, 0.4392, 0.7490)))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),axis.title.x=element_blank())+
+  ggtitle("Richness all samples (broad patterns)")+
+  labs(y="Richness")
+
+ggplot(meta,aes(x=type.location.gen.water.type,y=even,fill=sample.type))+
+  geom_boxplot()+
+  scale_fill_manual(values = c("#cc3a47",rgb(1, 0.7921569, 0.1568627),rgb(0.0078, 0.4392, 0.7490)))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),axis.title.x=element_blank())+
+  ggtitle("Evenness all samples (broad patterns)")+
+  labs(y="Evenness")
+
+
+```
+
+## Stacked barplots based on taxonomy
+
+### Phylum
+
+* Make stacked bar plots showing the proportion of reads per phylum per sample
+* Only phyla that comprised a mean of at least 0.5% of all reads (after standardizing read depths) are displayed
+* Note that for Cosley cloaca samples, the two clear groupings were driven by the 4 captive adults compared to the 5 captive juveniles
+* Note that the 5 outliers in the Cosely water samples were from the tap water (the remainder were tub samples)
+
+```{r}
+phyla.reads <- as.data.frame(otu_table(phylo.phy)) #extract proportion of reads per phyla per sample
+
+phyla.reads$names <- rownames(phyla.reads)#make column of row reads
+
+phyla.taxa <-  as.data.frame(tax_table(phylo.phy))#extract taxonomic information
+phyla.taxa <- cbind.data.frame(Phylum = phyla.taxa$Phylum, names = rownames(phyla.taxa))
+
+#merge data
+phyla <- merge(phyla.taxa,phyla.reads,by="names",all.x=T,all.y=T)
+
+phyla <- phyla[,-1]
+
+#extract and set aside the sum of the proportions of reads
+phyla.sum.of.reads <- cbind.data.frame(phyla$Phylum,rowSums(phyla[,2:ncol(phyla)]))
+#divide by sum of sums (same as number of samples) to get a proportion of reads per phylum based on a standardized read depth per sample
+phyla.sum.of.reads[,2] <- phyla.sum.of.reads[,2]/sum(phyla.sum.of.reads[,2])
+colnames(phyla.sum.of.reads) <- c("Phylum","proportion.of.reads")
+
+phyla <- melt(phyla,id.vars="Phylum") #convert to long
+
+colnames(phyla)[2:3] <- c("sample.ID","proportion.of.reads")
+
+phyla <- merge(meta,phyla,by="sample.ID",all.x=F,all.y=T) #merge with metadata
+
+#subset to phyla that comprise >= 0.5% of all reads
+phyla.5 <- phyla[which(phyla$Phylum %in% phyla.sum.of.reads[phyla.sum.of.reads$proportion.of.reads >= 0.005,"Phylum"] ),]
+
+#subset to phyla that comprise < 0.5% of all reads
+phyla.not5 <- phyla[which(phyla$Phylum %in% phyla.sum.of.reads[phyla.sum.of.reads$proportion.of.reads < 0.005,"Phylum"] ),]
+
+#calculate the total proportion comprised by Phyla < 0.5% of reads, compress to a single line with that label and proportion and combine back with the phyla.5 object so that there is now an other entry and sums per smaple are once again 1
+phyla.not5.list <- vector("list",length(unique(phyla.not5$sample.ID)))
+for(i in 1:length(unique(phyla.not5$sample.ID))){
+  samp.i <- phyla.not5[phyla.not5$sample.ID == unique(phyla.not5$sample.ID)[i],]
+  res.i <- samp.i[1,]
+  res.i$proportion.of.reads <- sum(samp.i$proportion.of.reads)
+  res.i$Phylum <- "Other (<0.5%)"
+  phyla.not5.list[[i]] <- res.i}
+phyla.5 <- rbind.data.frame(phyla.5,do.call("rbind.data.frame",phyla.not5.list))
+
+phyla.5$sample.type <- factor(phyla.5$sample.type,levels=c("water","plastron","cloaca"))
+
+#make a plot based on Phyla that comprise >= 0.5% of reads
+ggplot(phyla.5 ,aes(x=sample.ID,y=proportion.of.reads,fill=Phylum))+
+  geom_bar(position="stack", stat="identity",color="black",size=.01,width=1)+
+  facet_wrap(~sample.type+location.general,scales="free")+
+  scale_y_continuous(limits=c(0,1),expand=c(0,0))+
+  scale_fill_manual(values=Blue2DarkRed12Steps)+
+  theme(axis.text.x=element_blank())
+```
+
+* Make table with the mean per phyla for all phyla
+
+```{r}
+#calculate means per sample type
+phyla.sum <- phyla %>% 
+  group_by(Phylum,type.location.gen.water.type) %>% 
+  dplyr::summarize(mean=mean(proportion.of.reads)*100)
+
+
+kable.wrap(dcast(phyla.sum,Phylum~type.location.gen.water.type,value.var="mean"),"Mean percent of reads per sample type at the phylum level")
+
+```
+
+### Class
+
+* Make stacked bar plots showing the proportion of reads per class per sample
+* Only classes that comprised a mean of at least 0.5% of all reads (after standardizing read depths) are displayed
+* Note that for Cosley cloaca samples, the two clear groupings were driven by the 4 captive adults compared to the 5 captive juveniles
+* Note that the 5 outliers in the Cosely water samples were from the tap water (the remainder were tub samples)
+
+```{r}
+class.reads <- as.data.frame(otu_table(phylo.class)) #extract proportion of reads per class per sample
+
+class.reads$names <- rownames(class.reads)#make column of row reads
+
+class.taxa <-  as.data.frame(tax_table(phylo.class))#extract taxonomic information
+class.taxa <- cbind.data.frame(class = class.taxa$Class, names = rownames(class.taxa))
+
+#merge data
+class <- merge(class.taxa,class.reads,by="names",all.x=T,all.y=T)
+
+class <- class[,-1]
+
+#extract and set aside the sum of the proportions of reads
+class.sum.of.reads <- cbind.data.frame(class$class,rowSums(class[,2:ncol(class)]))
+#divide by sum of sums (same as number of samples) to get a proportion of reads per class based on a standardized read depth per sample
+class.sum.of.reads[,2] <- class.sum.of.reads[,2]/sum(class.sum.of.reads[,2])
+colnames(class.sum.of.reads) <- c("class","proportion.of.reads")
+
+#ggplot(class.sum.of.reads,aes(x=proportion.of.reads))+
+#  geom_histogram(boundary=0,binwidth=0.005)
+
+#nrow(class.sum.of.reads[class.sum.of.reads$proportion.of.reads > 0.005,])
+
+class <- melt(class,id.vars="class") #convert to long
+
+colnames(class)[2:3] <- c("sample.ID","proportion.of.reads")
+
+class <- merge(meta,class,by="sample.ID",all.x=F,all.y=T) #merge with metadata
+
+#subset to class that comprise >= 0.5% of all reads
+class.5 <- class[which(class$class %in% class.sum.of.reads[class.sum.of.reads$proportion.of.reads >= 0.005,"class"] ),]
+
+#subset to class that comprise < 0.5% of all reads
+class.not5 <- class[which(class$class %in% class.sum.of.reads[class.sum.of.reads$proportion.of.reads < 0.005,"class"] ),]
+
+#calcualte the total proportion comprised by class < 0.5% of reads, compress to a single line with that label and proportion and combine back with the class.5 object so that there is now an other entry and sums per smaple are once again 1
+class.not5.list <- vector("list",length(unique(class.not5$sample.ID)))
+for(i in 1:length(unique(class.not5$sample.ID))){
+  samp.i <- class.not5[class.not5$sample.ID == unique(class.not5$sample.ID)[i],]
+  res.i <- samp.i[1,]
+  res.i$proportion.of.reads <- sum(samp.i$proportion.of.reads)
+  res.i$class <- "Other (<0.5%)"
+  class.not5.list[[i]] <- res.i}
+class.5 <- rbind.data.frame(class.5,do.call("rbind.data.frame",class.not5.list))
+
+class.5$sample.type <- factor(class.5$sample.type,levels=c("water","plastron","cloaca"))
+
+#make a plot based on class that comprise >= 0.5% of reads
+ggplot(class.5 ,aes(x=sample.ID,y=proportion.of.reads,fill=class))+
+  geom_bar(position="stack", stat="identity",color="black",size=.01,width=1)+
+  scale_fill_manual(values=c(rgb(0,0,.4313725),Blue2DarkRed12Steps,rgb(.3882353,0.003921569,0.003921569)))+
+  facet_wrap(~sample.type+location.general,scales="free")+
+  scale_y_continuous(limits=c(0,1),expand=c(0,0))+
+  theme(axis.text.x=element_blank())
+```
+
+* Make table with the mean per class for all classes
+
+```{r}
+#calculate means per sample type
+class.sum <- class %>% 
+  group_by(class,type.location.gen.water.type) %>% 
+  dplyr::summarize(mean=mean(proportion.of.reads)*100)
+
+kable.wrap(dcast(class.sum,class~type.location.gen.water.type,value.var="mean"),"Mean percent of reads per sample type at the class level")
+```
+
+
+### Order
+
+* Make stacked bar plots showing the proportion of reads per order per sample
+* Only orders that comprised a mean of at least 2% of all reads (after standardizing read depths) are displayed
+* Note that for Cosley cloaca samples, the two clear groupings were driven by the 4 captive adults compared to the 5 captive juveniles
+* Note that the 5 outliers in the Cosely water samples were from the tap water (the remainder were tub samples)
+
+```{r}
+order.reads <- as.data.frame(otu_table(phylo.ord)) #extract proportion of reads per order per sample
+
+order.reads$names <- rownames(order.reads)#make column of row reads
+
+order.taxa <-  as.data.frame(tax_table(phylo.ord))#extract taxonomic information
+order.taxa <- cbind.data.frame(order = order.taxa$Order, names = rownames(order.taxa))
+
+#merge data
+order <- merge(order.taxa,order.reads,by="names",all.x=T,all.y=T)
+
+order <- order[,-1]
+
+#extract and set aside the sum of the proportions of reads
+order.sum.of.reads <- cbind.data.frame(order$order,rowSums(order[,2:ncol(order)]))
+#divide by sum of sums (same as number of samples) to get a proportion of reads per order based on a standardized read depth per sample
+order.sum.of.reads[,2] <- order.sum.of.reads[,2]/sum(order.sum.of.reads[,2])
+colnames(order.sum.of.reads) <- c("order","proportion.of.reads")
+
+#ggplot(order.sum.of.reads,aes(x=proportion.of.reads))+
+#  geom_histogram(boundary=0,binwidth=0.01)
+
+#nrow(order.sum.of.reads[order.sum.of.reads$proportion.of.reads > 0.02,])
+
+order <- melt(order,id.vars="order") #convert to long
+
+colnames(order)[2:3] <- c("sample.ID","proportion.of.reads")
+
+order <- merge(meta,order,by="sample.ID",all.x=F,all.y=T) #merge with metadata
+
+#subset to order that comprise >= 02% of all reads
+order1 <- order[which(order$order %in% order.sum.of.reads[order.sum.of.reads$proportion.of.reads >= 0.02,"order"] ),]
+
+#subset to order that comprise < 02% of all reads
+order.not1 <- order[which(order$order %in% order.sum.of.reads[order.sum.of.reads$proportion.of.reads < 0.02,"order"] ),]
+
+#calcualte the total proportion comprised by order < 01% of reads, compress to a single line with that label and proportion and combine back with the order1 object so that there is now an other entry and sums per smaple are once again 1
+order.not1.list <- vector("list",length(unique(order.not1$sample.ID)))
+for(i in 1:length(unique(order.not1$sample.ID))){
+  samp.i <- order.not1[order.not1$sample.ID == unique(order.not1$sample.ID)[i],]
+  res.i <- samp.i[1,]
+  res.i$proportion.of.reads <- sum(samp.i$proportion.of.reads)
+  res.i$order <- "Other (<2%)"
+  order.not1.list[[i]] <- res.i}
+order1 <- rbind.data.frame(order1,do.call("rbind.data.frame",order.not1.list))
+
+order1$sample.type <- factor(order1$sample.type,levels=c("water","plastron","cloaca"))
+
+#make a plot based on order that comprise >= 01% of reads
+ggplot(order1 ,aes(x=sample.ID,y=proportion.of.reads,fill=order))+
+  geom_bar(position="stack", stat="identity",color="black",size=.01,width=1)+
+  scale_fill_manual(values=c(rgb(0,0,.4313725),Blue2DarkRed12Steps,rgb(.3882353,0.003921569,0.003921569)))+
+  facet_wrap(~sample.type+location.general,scales="free")+
+  scale_y_continuous(limits=c(0,1),expand=c(0,0))+
+  theme(axis.text.x=element_blank())
+```
+
+* Make table with the mean per order for all orders
+
+```{r}
+#calculate means per sample type
+order.sum <- order %>% 
+  group_by(order,type.location.gen.water.type) %>% 
+  dplyr::summarize(mean=mean(proportion.of.reads)*100)
+
+kable.wrap(dcast(order.sum,order~type.location.gen.water.type,value.var="mean"),"Mean percent of reads per sample type at the orders level")
+```
+
+
+### Family
+
+* Make stacked bar plots showing the proportion of reads per family per sample
+* Only families that comprised a mean of at least 1.5% of all reads (after standardizing read depths) are displayed
+* Note that for Cosley cloaca samples, the two clear groupings were driven by the 4 captive adults compared to the 5 captive juveniles
+* Note that the 5 outliers in the Cosely water samples were from the tap water (the remainder were tub samples)
+```{r}
+family.reads <- as.data.frame(otu_table(phylo.fam)) #extract proportion of reads per family per sample
+
+family.reads$names <- rownames(family.reads)#make column of row reads
+
+family.taxa <-  as.data.frame(tax_table(phylo.fam))#extract taxonomic information
+family.taxa <- cbind.data.frame(family = family.taxa$Family, names = rownames(family.taxa))
+
+#merge data
+family <- merge(family.taxa,family.reads,by="names",all.x=T,all.y=T)
+
+family <- family[,-1]
+
+#extract and set aside the sum of the proportions of reads
+family.sum.of.reads <- cbind.data.frame(family$family,rowSums(family[,2:ncol(family)]))
+#divide by sum of sums (same as number of samples) to get a proportion of reads per family based on a standardized read depth per sample
+family.sum.of.reads[,2] <- family.sum.of.reads[,2]/sum(family.sum.of.reads[,2])
+colnames(family.sum.of.reads) <- c("family","proportion.of.reads")
+
+#ggplot(family.sum.of.reads,aes(x=proportion.of.reads))+
+#  geom_histogram(boundary=0,binwidth=0.01)
+
+#nrow(family.sum.of.reads[family.sum.of.reads$proportion.of.reads > 0.015,])
+
+family <- melt(family,id.vars="family") #convert to long
+
+colnames(family)[2:3] <- c("sample.ID","proportion.of.reads")
+
+family <- merge(meta,family,by="sample.ID",all.x=F,all.y=T) #merge with metadata
+
+#subset to family that comprise >= 1.5% of all reads
+family1 <- family[which(family$family %in% family.sum.of.reads[family.sum.of.reads$proportion.of.reads >= 0.015,"family"] ),]
+
+#subset to family that comprise < 1.5% of all reads
+family.not1 <- family[which(family$family %in% family.sum.of.reads[family.sum.of.reads$proportion.of.reads < 0.015,"family"] ),]
+
+#calcualte the total proportion comprised by family < 01% of reads, compress to a single line with that label and proportion and combine back with the family1 object so that there is now an other entry and sums per smaple are once again 1
+family.not1.list <- vector("list",length(unique(family.not1$sample.ID)))
+for(i in 1:length(unique(family.not1$sample.ID))){
+  samp.i <- family.not1[family.not1$sample.ID == unique(family.not1$sample.ID)[i],]
+  res.i <- samp.i[1,]
+  res.i$proportion.of.reads <- sum(samp.i$proportion.of.reads)
+  res.i$family <- "Other (<1.5%)"
+  family.not1.list[[i]] <- res.i}
+family1 <- rbind.data.frame(family1,do.call("rbind.data.frame",family.not1.list))
+
+family1$sample.type <- factor(family1$sample.type,levels=c("water","plastron","cloaca"))
+
+#make a plot based on family that comprise >= 01% of reads
+ggplot(family1 ,aes(x=sample.ID,y=proportion.of.reads,fill=family))+
+  geom_bar(position="stack", stat="identity",color="black",size=.01,width=1)+
+  scale_fill_manual(values=c(rgb(0,0,.4313725),Blue2DarkRed12Steps,rgb(.3882353,0.003921569,0.003921569)))+
+  facet_wrap(~sample.type+location.general,scales="free")+
+  scale_y_continuous(limits=c(0,1),expand=c(0,0))+
+  theme(axis.text.x=element_blank())
+```
+
+* Make table with the mean per family for all families
+
+```{r}
+#calculate means per sample type
+family.sum <- family %>% 
+  group_by(family,type.location.gen.water.type) %>% 
+  dplyr::summarize(mean=mean(proportion.of.reads)*100)
+
+kable.wrap(dcast(family.sum,family~type.location.gen.water.type,value.var="mean"),"Mean percent of reads per sample type at the familys level")
+```
+
+
+## Heatmaps using all data
+
+* Make heatmaps at different taxonomic levels based on all data
+* The heatmap based on ASVs was included in the manuscript
+
+```{r}
+phylo.heat.loop(phylo.list, data = meta  , ID.col = "sample.ID", order1 = "captive.wild",order2="sample.type",order3="location",order4="age",title = "All data",method = "NMDS",taxa.label = label.list)
+```
+
+
+## Venn diagrams using broad data
+
+### Comparisons of water and plastron samples for captive juveniles based on ASVs
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+#juveniles at cosely, plastron
+j.cos.plas <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$age == "juvenile" & meta$location == "Cosley" & meta$sample.type == "plastron"),"sample.ID"]))])
+
+#juveniles at shedd, plastron
+j.shedd.plas <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$age == "juvenile" & meta$location == "Shedd" & meta$sample.type == "plastron"),"sample.ID"]))])
+
+#tubb water at the shedd
+w.shedd <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$water.type == "tub" & meta$location == "Shedd" & meta$sample.type == "water"),"sample.ID"]))])
+
+#tubb water at cosley
+w.cos <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$water.type == "tub" & meta$location == "Cosley" & meta$sample.type == "water"),"sample.ID"]))])
+
+j.water.input <- cbind.data.frame(j.cos.plas,w.shedd,j.shedd.plas,w.cos)
+
+j.water.input <- venn.cat(j.water.input,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.quad(j.water.input,category=c("Cosley plastron","Shedd water","Shedd plastron","Cosley water")))
+```
+
+
+### Comparisons of water and plastron samples for captive juveniles based on families
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+fam <- otu_table(phylo.fam)
+
+#juveniles at cosely, plastron
+j.cos.plas.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$age == "juvenile" & meta$location == "Cosley" & meta$sample.type == "plastron"),"sample.ID"]))])
+
+#juveniles at shedd, plastron
+j.shedd.plas.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$age == "juvenile" & meta$location == "Shedd" & meta$sample.type == "plastron"),"sample.ID"]))])
+
+#tubb water at the shedd
+w.shedd.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$water.type == "tub" & meta$location == "Shedd" & meta$sample.type == "water"),"sample.ID"]))])
+
+#tubb water at cosley
+w.cos.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$water.type == "tub" & meta$location == "Cosley" & meta$sample.type == "water"),"sample.ID"]))])
+
+j.water.input.f <- cbind.data.frame(j.cos.plas.f,w.shedd.f,j.shedd.plas.f,w.cos.f)
+
+j.water.input.f <- venn.cat(j.water.input.f,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.quad(j.water.input.f,category=c("Cosley plastron","Shedd water","Shedd plastron","Cosley water")))
+```
+
+
+### Comparisons of plastron samples for captive and wild turtles based on ASVs
+
+* Captive turtles were juveniles
+* Wild turtles were adults
+* This was included in the manuscript
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+#wild adults, plastron
+a.wild.plas <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$captive.wild == "wild" & meta$sample.type == "plastron"),"sample.ID"]))])
+
+plas.input <- cbind.data.frame(j.cos.plas,a.wild.plas,j.shedd.plas)
+
+plas.input <- venn.cat(plas.input,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.trip(plas.input,category=c("Cosley","Wild","Shedd")))
+```
+
+### Comparisons of plastron samples for captive and wild turtles based on families
+
+* Captive turtles were juveniles
+* Wild turtles were adults
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+#wild adults, plastron
+a.wild.plas.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$captive.wild == "wild" & meta$sample.type == "plastron"),"sample.ID"]))])
+
+
+plas.input.f <- cbind.data.frame(j.cos.plas.f,a.wild.plas.f,j.shedd.plas.f)
+
+plas.input.f <- venn.cat(plas.input.f,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.trip(plas.input.f,category=c("Cosley","Wild","Shedd")))
+
+```
+
+
+### Comparisons of water and plastron samples for wild turtles based on ASVs
+
+* Wild turtles were adults
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+#wild adults, plastron
+w.wild <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$captive.wild == "wild" & meta$sample.type == "water"),"sample.ID"]))])
+
+a.water.input <- cbind.data.frame(w.shedd,a.wild.plas,w.cos,w.wild)
+
+a.water.input <- venn.cat(a.water.input,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.quad(a.water.input,category=c("Shedd water","Wild adult","Cosley water","Wild water")))
+```
+
+### Comparisons of water and plastron samples for wild turtles based on families
+
+* Wild turtles were adults
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+#wild adults, plastron
+w.wild.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$captive.wild == "wild" & meta$sample.type == "water"),"sample.ID"]))])
+
+a.water.input.f <- cbind.data.frame(w.shedd.f,a.wild.plas.f,w.cos.f,w.wild.f)
+
+a.water.input.f <- venn.cat(a.water.input.f,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.quad(a.water.input.f,category=c("Shedd water","Wild adult","Cosley water","Wild water")))
+
+```
+
+
+### Comparisons of cloaca samples based on ASVs
+
+* Wild turtles were adults
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+
+#juveniles at cosely, cloaca
+j.cos.clo <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$age == "juvenile" & meta$location == "Cosley" & meta$sample.type == "cloaca"),"sample.ID"]))])
+
+#adults at cosely, cloaca
+a.cos.clo <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$age == "adult" & meta$location == "Cosley" & meta$sample.type == "cloaca"),"sample.ID"]))])
+
+#wild adults, cloaca
+a.wild.clo <- rowSums(asv[,which(colnames(asv) %in% c(meta[which(meta$captive.wild == "wild" & meta$sample.type == "cloaca"),"sample.ID"]))])
+
+clo.input <- cbind.data.frame(a.wild.clo,w.cos,a.cos.clo,j.cos.clo)
+
+clo.input <- venn.cat(clo.input,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.quad(clo.input,category=c("Wild adult","Cosley water","Cosley adult","Cosley juvenile")))
+```
+
+
+### Comparisons of cloaca samples based on familes
+
+* Wild turtles were adults
+
+```{r}
+#make row sums for each subcategory (actual numbers are irrelevant, only presence absence maters)
+
+#juveniles at cosely, cloaca
+j.cos.clo.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$age == "juvenile" & meta$location == "Cosley" & meta$sample.type == "cloaca"),"sample.ID"]))])
+
+#adults at cosely, cloaca
+a.cos.clo.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$age == "adult" & meta$location == "Cosley" & meta$sample.type == "cloaca"),"sample.ID"]))])
+
+#wild adults, cloaca
+a.wild.clo.f <- rowSums(fam[,which(colnames(fam) %in% c(meta[which(meta$captive.wild == "wild" & meta$sample.type == "cloaca"),"sample.ID"]))])
+
+clo.input.f <- cbind.data.frame(a.wild.clo.f,w.cos.f,a.cos.clo.f,j.cos.clo.f)
+
+clo.input.f <- venn.cat(clo.input.f,T,F)
+
+ggplot()+theme_bw()
+grid.draw(venn.quad(clo.input.f,category=c("Wild adult","Cosley water","Cosley adult","Cosley juvenile")))
+```
+
+# Water
+
+## Subset
+
+* Make subset of water samples
+
+```{r}
+water <- meta[meta$sample.type == "water",]
+
+water.no.tap <- water[water$water.type != "tap",] #removes tap water
+```
+
+## Heatmaps: sites
+
+* Make heatmaps of water samples
+* Tub and marsh water (tap water was removed)
+* Data are pseudoreplicated (repeated samples per tub)
+* Note: the ASV and Family graphs are labeled "OTU" on the Y axis. This is due to a bug in phyloseq that I have been unable to isolate.
+
+```{r}
+phylo.heat.loop(phylo.list, data = water.no.tap  , ID.col = "sample.ID", order1 = "location.general",title = "Water locations",method = "NMDS",taxa.label.list = label.list)
+```
+
+* Differences between wild and tub samples remain obvious all the way through Class, and are still apparent at the Phylum level
+* The two sites are largely similar by the Class level, but different before then
+
+## Alpha diversity: sites
+
+### Richness
+
+**Compare richness among Cosley, Shedd, and wild (no tap)**
+
+* Run a linear model on richness where 
+  * location.general = shedd, cosely, or wild marshes
+  * specific.wild = tub# or swamp (PW or TC)
+  * specific is nested in location
+  * Date is a random effect (categorical)
+  * Tap water was not included
+
+**Run model**
+
+```{r}
+wrm1 <- lmer(rich~log10(read.depth)+location.general/specific.wild+(1|date),data = water.no.tap )
+check_model(wrm1,check=c("qq","ncv"))
+```
+
+* Model fit looks ok, run ANOVA
+
+```{r}
+kable.wrap(Anova(wrm1),caption="Result: Mixed effects ANOVA comparing mean richness among water samples at different locaitons")
+```
+
+* All factors were significant
+* Run post hoc test
+
+```{r}
+kable.wrap(pairs(emmeans(wrm1,"location.general")),caption="Result: Post hoc test of mixed effects ANOVA comparing mean richness among water samples at different locaitons")
+```
+
+* Tub water richness did not differ significantly between Shedd and Cosely
+* Tubs at both the Shedd and Cosley had significantly higher richness than the marshes
+
+### Evenness
+
+**Compare evenness among Cosley, Shedd, and wild (no tap)**
+
+* Run a linear model on evenness where 
+  * location.general = shedd, cosely, or wild marshes
+  * specific.wild = tub# or swamp (PW or TC)
+  * specific is nested in location
+  * Date is a random effect (categorical)
+  * Tap water was not included
+
+**Run model**
+
+```{r}
+wem1 <- lmer(even~log10(read.depth)+location.general/specific.wild+(1|date),data = water.no.tap )
+check_model(wem1,check=c("qq","ncv"))
+```
+
+* Model fit looks acceptable, run ANOVA
+
+```{r}
+kable.wrap(Anova(wem1),caption="Result: Mixed effects ANOVA comparing mean evenness among water samples at different locaitons")
+```
+
+## Beta diversity: sites
+
+* PCoAs (PERMANOVAs cannot be run accurately due to complex data structure)
+
+```{r}
+for(i in 1:length(dists)){
+
+  meta.i <- water
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+ plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(shape=location.general,fill=water.type,stroke=1),color = "black",size=4)+
+    scale_shape_manual(values=c(21, 22,24,25))+
+    scale_fill_manual(values = c("lightblue","blue","darkblue"))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    guides(fill=guide_legend(override.aes=list(colour=c("lightblue","blue","darkblue"))))+
+    ggtitle(paste(names(dists)[i],"(water samples)"))
+ 
+ print(plot)}
+```
+
+* The complex data structure makes it impossible to run a statistically valid PERMANOVA across all groups, and some samples sizes are very small
+* Nevertheless, using any dissimilarity metric, there clearly appear to be strong differences among all categories. Interestingly, the tap water was often closer to the marshes than to the tubs
+
+
+## Cosley
+
+**Look more closely within Cosley**
+
+* Subset to Cosley data
+```{r}
+cos.w <- water[water$location == "Cosley",]
+```
+
+
+### Tap and tubs
+**Compare tubs and tap water within Cosley**
+
+* Compare tap and tubs statically for days when both were present
+* For each of the 5 days, there is a water sample for tub7, a water sample for tub11, and a tap water sample
+  * All of these days were water change days
+    * All tub samples were taken **after water changes**
+    * Water changes involved completely changing the water and scrubbing the tanks (no chemicals other than water were used)
+    * Tab samples were collected straight from the hose used to fill the tanks
+* **Note** This is not the full collection of water samples available and should not be relied on for tests of changes over time. Date is simply included here as a covariate. Subsequent tests using all water samples will evaluate changes over time.
+* The question of interest here is whether tubs and tap water are different
+  * Therefore, we will simply compare tubs and tap, with tub number nested under tub
+  * The only model output terms we care about here are date and water.type 
+
+```{r}
+#subset data
+water.cosley.tapXtub <- cos.w[cos.w$date %in% cos.w[cos.w$water.type == "tap","date"],]
+```
+
+#### Heatmaps
+
+* Ordered by date then by tap or tub
+* Thus, the data are in triplets, with each triplet containing a tap, tub11, and tub 7 sample (in that order)
+* The triplets are ordered by date
+* Note: the ASV and Family graphs are labeled "OTU" on the Y axis. This is due to a bug in phyloseq that I have been unable to isolate.
+
+```{r}
+phylo.heat.loop(phylo.list, data = water.cosley.tapXtub , ID.col = "sample.ID", order1="date",order2="specific",title = "Tub vs tap ordered by tap or tub (water change days)",method = "NMDS",taxa.label = label.list)
+```
+
+
+#### Richness
+
+**Compare tubs and tap water within Cosley (richness)**
+
+* Plot regressions of richness over time
+```{r}
+#linear regressions
+ggplot(water.cosley.tapXtub,aes(x = as.Date(date),y=rich,group=specific,color=specific,fill=specific))+
+    geom_point(size=4)+
+   geom_smooth(method="lm",se=T)+ 
+   theme_bw()+
+  ggtitle("Cosley water richness among tubs and tap over time")
+``` 
+
+* Run and check linear model for richness
+```{r}
+wr3 <- lm(rich~water.type/specific+date.sc+log10(read.depth),data=water.cosley.tapXtub)
+check_model(wr3,check=c("qq","ncv"))
+```
+
+* Acceptable fit, run ANOVA
+
+```{r}
+kable.wrap(Anova(wr3),caption="Result: ANOVA examining richness and date among tubs and tap")
+```
+
+* Significant main effect of richness (tubs have more richness than tap water)
+* Non-significant effect of date (sloped line, but small sample sizes and wide confidence)
+
+
+#### Evenness
+
+**Compare tubs and tap water within Cosley (evenness)**
+
+* Plot evenness
+```{r}
+#linear regressions
+ggplot(water.cosley.tapXtub,aes(x = as.Date(date),y=even,group=specific,color=specific,fill=specific))+
+    geom_point(size=4)+
+   geom_smooth(method="lm",se=T)+ 
+   theme_bw()+
+  ggtitle("Cosley water evenness among tubs and tap over time")
+``` 
+
+
+* Run and check linear model for evenness
+```{r}
+we3 <- lm(even~water.type/specific+date.sc+log10(read.depth),data=water.cosley.tapXtub)
+check_model(we3,check=c("qq","ncv"))
+```
+
+* Acceptable fit, run ANOVA
+
+```{r}
+kable.wrap(Anova(we3),caption="Result: ANOVA examining evenness and date among tubs and tap")
+```
+
+* Significant main effect of evenness (tubs have more evenness than tap water)
+* Non-significant of date (probably due to small sample size for tubs and flat slope for tap)
+
+
+#### Beta diversity
+
+**Compare tubs and tap water within Cosley**
+
+##### PCoA plots
+```{r}
+
+for(i in 1:length(dists)){
+
+  meta.i <- water.cosley.tapXtub
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+ plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(shape=specific,fill=water.type,stroke=1),color = "black",size=4)+
+    scale_shape_manual(values=c(21, 22,24,25))+
+    scale_fill_manual(values = c("red","blue"))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    guides(fill=guide_legend(override.aes=list(colour=c("red","blue"))))+
+    ggtitle(paste(names(dists)[i],"(Cosley water samples on a water change day)"))
+ 
+ print(plot)}
+```
+
+##### PERMANOVAs
+
+* Compare beta diversity for tap water and tubs at Cosley
+* Again, only the water.type result, and to a lesser degree the date are interesting
+* Run PERMANOVAs (specific [i.e., tub number] nested in water type)
+
+```{r, results = 'asis'}
+temp<- perm.loop("dist_subset(distance.list[[i]],water.cosley.tapXtub$sample.ID)~log10(read.depth)+water.type/specific+date.sc",water.cosley.tapXtub,c("read.depth","water.type","date"),"PERMANOVA results: Cosley tubs vs tap",distance.list=dists)
+```
+
+* The difference between tubs and tap water is strongly significant
+* The effect of date was generally not significant, but as before, that could be from low sample sizes and a lack of effect for tap water
+
+
+### Tubs and dates
+**Compare tubs over time within Cosley**
+
+* This will use all available data on water samples of Cosley tubs to compare tubs as well as looking at changes over time
+  * Water samples were only collected from 2 tubs
+* Water changes took place weekly, and half the water samples were taken the day before a water change, while the other half were taken the day after a water change
+* Water changes are, therefore, included in the model
+
+```{r}
+#subset data
+water.cosley.no.tap <- cos.w[cos.w$water.type != "tap",] #subsets to Cosely water without tap water
+
+water.cosley.no.tap[water.cosley.no.tap$day.number=="C1","day.number"] <- "after.change"
+water.cosley.no.tap[water.cosley.no.tap$day.number=="C7","day.number"] <- "before.change"
+
+colnames(water.cosley.no.tap)[which(colnames(water.cosley.no.tap)=="day.number")] <- "water.change"
+```
+
+#### Richness
+**Compare tubs over time within Cosley**
+
+* Plot richness
+```{r}
+#linear regressions
+ggplot(water.cosley.no.tap,aes(x = as.Date(date),y=rich,shape=water.change,color=specific))+
+    geom_point(size=4)+
+   geom_smooth(aes(linetype = water.change),method="lm",se=F)+ 
+   theme_bw()+
+  ggtitle("Richness between tubs over time")
+
+
+ggplot(water.cosley.no.tap,aes(x = specific,y=rich,fill=water.change))+
+   geom_boxplot()+
+   theme_bw()+
+  ggtitle("Richness between tubs and water changes")
+``` 
+
+* Run and check linear model for richness
+```{r}
+wr4 <- lm(rich~water.change+specific+date.sc+log10(read.depth),data=water.cosley.no.tap)
+check_model(wr4,check=c("qq","ncv"))
+```
+
+* Acceptable fit, run ANOVA
+
+```{r}
+kable.wrap(Anova(wr4),caption="Result: ANOVA examining richness between tubs and water changes over time")
+```
+
+* Significant difference for richness between tubs
+* Samples right after water changes have higher richness than days a week later (although this is largely driven by tub11)
+* Richness significantly declined over time
+
+#### Evenness
+**Compare tubs over time within Cosley**
+
+* Plot evenness
+```{r}
+#linear regressions
+ggplot(water.cosley.no.tap,aes(x = as.Date(date),y=even,shape=water.change,color=specific))+
+    geom_point(size=4)+
+   geom_smooth(aes(linetype = water.change),method="lm",se=F)+ 
+   theme_bw()+
+  ggtitle("Evenness between tubs over time")
+
+
+ggplot(water.cosley.no.tap,aes(x = specific,y=even,fill=water.change))+
+   geom_boxplot()+
+   theme_bw()+
+  ggtitle("Evenness between tubs and water changes")
+``` 
+
+
+* Run and check linear model for evenness
+```{r}
+we4 <- lm(even~water.change+specific+date.sc+log10(read.depth),data=water.cosley.no.tap)
+check_model(we4,check=c("qq","ncv"))
+```
+
+* Acceptable fit, run ANOVA
+
+```{r}
+kable.wrap(Anova(we4),caption="Result: ANOVA examining evenness between tubs and water changes over time")
+```
+
+* Evenness significantly declined over time 
+* Nearly significant effect of water change days (higher immediately after water change)
+* No difference between tubs
+
+
+#### Beta diversity
+
+**Compare tubs over time within Cosley**
+
+##### PCoAs (by tub)
+
+* Color plot by tub, and shape by water changes
+
+```{r}
+
+for(i in 1:length(dists)){
+
+  meta.i <- water.cosley.no.tap
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+ plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(shape=water.change,color=specific,stroke=1),size=4)+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    ggtitle(paste(names(dists)[i],"(Cosley water samples between tubs and water changes)"))
+ 
+ print(plot)}
+```
+
+* Looks like probably an effect of tub and water changes 
+
+##### PCoAs (by date)
+
+* Plotted continuously
+
+```{r}
+for(i in 1:length(dists)){
+
+  meta.i <- water.cosley.no.tap
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+  plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(shape=specific,fill=as.Date(date),color=as.Date(date),size=4))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    ggtitle(paste(names(dists)[i],"(Cosley water tubs over time)"))
+
+ print(plot)}
+```
+
+* There is clearly an effect of date
+
+
+##### PERMANOVA
+
+**Compare tubs over time within Cosley**
+
+```{r, results = 'asis'}
+temp<- perm.loop("dist_subset(distance.list[[i]],water.cosley.no.tap$sample.ID)~log10(read.depth)+date.sc+water.change+specific",water.cosley.no.tap,c("read.depth","date","water.change","specific"),"PERMANOVA results: Cosley tubs and water changes over time",distance.list=dists)
+```
+
+* Strong effect of date
+* Generally an effect of water change (except of weighted unifrac)
+* Generally a significant difference between tubs
+
+## Shedd
+
+* Subset to Shedd samples
+* **Note** unlike in Cosely, there are no samples for before/after water changes, and on most days, there are two samples per tub
+```{r}
+water.shedd <- water[water$location == "Shedd" ,]
+```
+
+### Richness
+
+**Shedd tub water richness between tubs and over time**
+```{r}
+#linear regressions
+ggplot(water.shedd,aes(x = as.Date(date),y=rich,group=specific))+
+    geom_point(aes(shape=specific,fill=specific,color=specific),size=4)+
+   geom_smooth(method="lm",aes(fill=NULL,color=specific),se=F)+ 
+   theme_bw()+
+  ggtitle("Shedd tub water richness over time")
+```
+
+* Looks like increasing richness over time
+* Will run a linear model comparing richness between tubs ("specific") and date (as a linear variable), with read depth included as a covariate
+```{r}
+#"specific = tub#
+wr5 <- lm(rich~specific+date.sc+log10(read.depth),data=water.shedd)
+check_model(wr5,check=c("qq","ncv"))
+```
+
+* Distribution is tailed due to outliers, but still not terrible. Attempts at other distributions are worse
+* Run ANOVA
+
+```{r}
+kable.wrap(Anova(wr5),caption="Results: ANOVA comparing Shedd tub water richness between tubs and over time")
+```
+
+* There is a significant increase in Shedd tub richness over time
+* This is very interesting because at the Shedd, richness is **increasing** over time, and at Cosley, it is **decreasing** over time
+
+### Evenness
+
+**Shedd tub water evenness between tubs and over time**
+```{r}
+#linear regressions
+ggplot(water.shedd,aes(x = as.Date(date),y=even,group=specific))+
+    geom_point(aes(shape=specific,fill=specific,color=specific,size=4))+
+   geom_smooth(method="lm",aes(fill=NULL,color=specific),se=F)+ 
+   theme_bw()+
+  ggtitle("Shedd tub water evenness over time")
+```
+
+* No obvious trends
+* Will run a linear model comparing evenness between tubs ("specific") and date (as a linear variable), with read depth included as a covariate
+
+```{r}
+#"specific" = tub#
+we5 <- lm(even~specific+date.sc+log10(read.depth),data=water.shedd)
+check_model(we5,check=c("qq","ncv")) 
+```
+
+* Reasonable fit, run ANOVA
+
+```{r}
+kable.wrap(Anova(we5),caption="Results: ANOVA comparing Shedd tub water evenness between tubs and over time")
+```
+
+* No significant effects
+
+### Beta diversity
+
+#### PCoA plots
+
+* Plot by date
+
+```{r}
+#Plot by date
+for(i in 1:length(dists)){
+
+  meta.i <- water.shedd
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+ plot <- ggplot(meta.i,aes(x = x,y=y,group=date))+
+    geom_point(aes(shape=specific,fill=date,color=date),size=4)+
+    theme_bw()+
+    ggtitle(paste(names(dists)[i],"(Shedd tub water over time)"))
+ 
+ print(plot)
+}
+```
+
+* Clearly a very strong effect of date
+
+#### PERMANOVAs
+```{r, results = 'asis'}
+temp<- perm.loop("dist_subset(distance.list[[i]],water.shedd$sample.ID)~log10(read.depth)+date.sc+specific",water.shedd,c("read.depth","date","specific"),"PERMANOVA results: Shedd tubs over time",distance.list=dists)
+```
+
+* Strongly significant effect of date in each case
+
+# Cloaca
+
+* Subset samples to all cloacal samples
+```{r}
+cloaca <- meta[meta$sample.type == "cloaca",] #subset to cloaca samples
+```
+
+
+## Compare wild, captive, age
+
+* Analyses of cloaca data are challenging because data are available from disparate groups:
+  * Wild adults
+    * 2018
+    * 2019
+  * Captive (Cosley)
+    * Adults
+    * Juveniles
+* These groups do not make for clean comparisons in a single model, because date (year) is a factor in the wild, whereas age is a factor in captivity
+* Therefore, we will run 6 models: 
+  * Cosley juvenile vs Cosley adult
+  * Wild adult 2018 vs wild adult 2019
+  * Cosley juvenile vs wild adults 2018
+  * Cosley juvenile vs wild adults 2019
+  * Cosley adult vs wild adults 2018
+  * Cosley adult vs wild adults 2019
+* We will use a sequential Bonferroni correction to adjust the p values
+* This will only be done for PERMANOVAs. The sample sizes within each of those groups is often too small to make meaningful comparisons of alpha diversity
+
+**make subsets**
+
+```{r}
+
+cloaca.wild <- cloaca[cloaca$captive.wild == "wild",] #subset to wild cloaca samples
+
+cloaca.cosley  <- cloaca[cloaca$captive.wild == "captive",] #subset to captive cloaca samples
+
+cloaca.cosley.adultXwild18 <- rbind.data.frame(cloaca.wild[cloaca.wild$year==2018,] ,cloaca.cosley[cloaca.cosley$age=="adult",]) #subset to wild 2018 cloaca samples and captive adults
+
+cloaca.cosley.adultXwild19 <- rbind.data.frame(cloaca.wild[cloaca.wild$year==2019,] ,cloaca.cosley[cloaca.cosley$age=="adult",]) #subset to wild 2018 cloaca samples and captive adults
+
+cloaca.cosley.juvenileXwild18 <- rbind.data.frame(cloaca.wild[cloaca.wild$year==2018,] ,cloaca.cosley[cloaca.cosley$age=="juvenile",]) #subset to wild 2018 cloaca samples and captive juveniles
+
+cloaca.cosley.juvenileXwild19 <- rbind.data.frame(cloaca.wild[cloaca.wild$year==2019,] ,cloaca.cosley[cloaca.cosley$age=="juvenile",]) #subset to wild 2019 cloaca samples and captive juveniles
+```
+
+### Heatmaps
+
+* Note: the ASV and Family graphs are labeled "OTU" on the Y axis. This is due to a bug in phyloseq that I have been unable to isolate.
+
+```{r}
+phylo.heat.loop(phylo.list, data = cloaca , ID.col = "sample.ID", order1 = "location.general", order2="age",order3="year",title = "Cloaca by location age and year",method="NMDS",taxa.label=label.list)
+
+```
+
+* Very clear differences among groups
+* Interestingly, there are a few prominent ASVs shared by wild turtles and captive juveniles, but not wild turtles and captive adults
+
+### Richness
+
+* This plot was included in the manuscript
+
+```{r}
+ggplot(cloaca,aes(x=location.general,y=rich,fill=paste(age,year)))+
+  geom_boxplot()+
+  ggtitle("cloacal richness")
+```
+
+
+### Evenness
+
+* This plot was included in the manuscript
+```{r}
+ggplot(cloaca,aes(x=location.general,y=even,fill=paste(age,year)))+
+  geom_boxplot()+
+  ggtitle("cloacal evenness")
+```
+
+### Beta diversity
+
+**Comparing cloacal samples for wild and captive turtles, years, and age**
+
+#### PCoAs and boxplots
+
+* Split by location, year, and age
+```{r}
+for(i in 1:length(dists)){
+
+  meta.i <- cloaca
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+ plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(shape=age,color=paste(location.general,year)),size=4)+
+  #  scale_shape_manual(values=c(21, 22,24,25))+
+ #   scale_fill_manual(values = c("#cc3a47",rgb(1, 0.7921569, 0.1568627),rgb(0.0078, 0.4392, 0.7490)))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+ #   guides(fill=guide_legend(override.aes=list(colour=c("#cc3a47",rgb(1, 0.7921569, 0.1568627),rgb(0.0078, 0.4392, 0.7490)))))+
+    ggtitle(paste(names(dists)[i]),"Cloacal samples")
+ 
+ print(plot)
+ }
+```
+
+* Generally appear to be strong effects among all groups
+
+#### PERMANOVAs
+
+* **Note** Final P value adjustment will be done in the "results summary" tab (to account for the four pairwise tests and the 8 dissimilarities)
+
+##### Wild: 2018 vs 2019
+```{r, results = 'asis'}
+cloaca.wild.perm <- perm.loop("dist_subset(distance.list[[i]],cloaca.wild$sample.ID)~log10(read.depth)+year",cloaca.wild,c("log10(read.depth)","year"),"PERMANOVA results: cloaca (wild adult 2018 vs wild adult 2019)",distance.list=dists)
+```
+
+##### Cosley: Juvenile vs adult
+```{r, results = 'asis'}
+cloaca.cosley.perm <- perm.loop("dist_subset(distance.list[[i]],cloaca.cosley$sample.ID)~log10(read.depth)+age",cloaca.cosley,c("log10(read.depth)","age"),"PERMANOVA results: cloaca (Cosley juvenile vs adult)",distance.list=dists)
+```
+
+##### Cosley adults vs wild adults 2018
+```{r, results = 'asis'}
+cloaca.cosley.adultXwild18.perm <- perm.loop("dist_subset(distance.list[[i]],cloaca.cosley.adultXwild18$sample.ID)~log10(read.depth)+captive.wild",cloaca.cosley.adultXwild18,c("log10(read.depth)","captive.wild"),"PERMANOVA results: cloaca (Cosley adult vs wild 2018 adult)",distance.list=dists)
+```
+
+##### Cosley adults vs wild adults 2019
+```{r, results = 'asis'}
+cloaca.cosley.adultXwild19.perm <- perm.loop("dist_subset(distance.list[[i]],cloaca.cosley.adultXwild19$sample.ID)~log10(read.depth)+captive.wild",cloaca.cosley.adultXwild19,c("log10(read.depth)","captive.wild"),"PERMANOVA results: cloaca (Cosley adult vs wild 2019 adult)",distance.list=dists)
+```
+
+##### Cosley juveniles vs wild adults 2018
+```{r, results = 'asis'}
+cloaca.cosley.juvenileXwild18.perm <- perm.loop("dist_subset(distance.list[[i]],cloaca.cosley.juvenileXwild18$sample.ID)~log10(read.depth)+captive.wild",cloaca.cosley.juvenileXwild18,c("log10(read.depth)","captive.wild"),"PERMANOVA results: cloaca (Cosley adult vs wild 2018 adult)",distance.list=dists)
+```
+
+##### Cosley juveniles vs wild adults 2019
+```{r, results = 'asis'}
+cloaca.cosley.juvenileXwild19.perm <- perm.loop("dist_subset(distance.list[[i]],cloaca.cosley.juvenileXwild19$sample.ID)~log10(read.depth)+captive.wild",cloaca.cosley.juvenileXwild19,c("log10(read.depth)","captive.wild"),"PERMANOVA results: cloaca (Cosley adult vs wild 2019 adult)",distance.list=dists)
+```
+
+##### Results summary
+
+* Calculate adjusted p values (sequential Bonferroni) based on all comparisons within ASVs (all 4 dissimilarities X all 6 tests) and within families
+```{r}
+asv.adjusted <- p.adjust(c(cloaca.wild.perm[1:4,2],cloaca.cosley.perm[1:4,2],cloaca.cosley.adultXwild18.perm[1:4,2],cloaca.cosley.adultXwild19.perm[1:4,2],cloaca.cosley.juvenileXwild18.perm[1:4,2],cloaca.cosley.juvenileXwild19.perm[1:4,2]),"holm")
+asv.adjusted <- cbind(asv.adjusted[1:4],asv.adjusted[5:8],asv.adjusted[9:12],asv.adjusted[13:16],asv.adjusted[17:20],asv.adjusted[21:24])
+
+family.adjusted <-  p.adjust(c(cloaca.wild.perm[5:8,2],cloaca.cosley.perm[5:8,2],cloaca.cosley.adultXwild18.perm[5:8,2],cloaca.cosley.adultXwild19.perm[5:8,2],cloaca.cosley.juvenileXwild18.perm[5:8,2],cloaca.cosley.juvenileXwild19.perm[5:8,2]),"holm")
+family.adjusted <- cbind(family.adjusted[1:4],family.adjusted[5:8],family.adjusted[9:12],family.adjusted[13:16],family.adjusted[17:20],family.adjusted[21:24])
+
+adjusted <- rbind.data.frame(asv.adjusted,family.adjusted)
+
+rownames(adjusted) <- rownames(cloaca.wild.perm)
+
+colnames(adjusted) <- c("Wild adults (2018 vs 2019)","Cosley (juvenile vs adult)","Cosley adult vs wild adult 2018","Cosley adult vs wild adult 2019","Cosley juvenile vs wild adult 2018","Cosley juvenile vs wild adult 2019")
+
+kable.wrap(adjusted,caption="Summary Results: Adjusted P values from cloaca PERMANOVAs")
+
+```
+
+* All comparisons are significant after correction for multiple comparisons
+
+# Plastron
+
+* Make plastron subset
+
+```{r}
+plastron <- meta[meta$sample.type=="plastron",] #subsets to plastron
+```
+
+## Cosley headstarts
+
+### Subset
+
+* Subset plastron samples to Cosley turtles (all of which were juveniles for plastron samples)
+* Subset to only turtles with at least 3 data points
+
+```{r}
+plastron.cosley <- plastron[plastron$location == "Cosley",] #subset to cosley
+
+plastron.cosley.count <- plyr::count(plastron.cosley$source.ID) #counts number of data points per individual
+
+plastron.cosley.3 <- plastron.cosley[which(plastron.cosley$source.ID %in% plastron.cosley.count[which(plastron.cosley.count$freq>2),1]),] #subset to individuals with at least 3 data points
+```
+
+### Heatmaps
+
+* Ordered by date
+* Note: the ASV graph labeled "OTU" on the Y axis. This is due to a bug in phyloseq that I have been unable to isolate.
+```{r}
+phylo.heat(phylo.list[[1]], plastron.cosley.3, ID.col = "sample.ID", order1 = "date", title = "Cosley plastron ordered by date (ASV)", method = "NMDS", taxa.label = "ASV")
+
+```
+
+* A slight shift over time is visible at the ASV level. The other levels were not informative and are not shown
+
+### Richness (individuals and time)
+
+**Comparing Cosley plastron samples over time and among individuals**
+
+#### Plot
+
+* Plot individuals over time
+* Each line is an individual
+
+```{r}
+ggplot(plastron.cosley.3,aes(x=as.Date(date),y=rich,group=source.ID))+
+  geom_point(aes(color=source.ID))+
+  geom_smooth(method="lm",se=F,aes(color=source.ID))+
+  ggtitle("date X richness seperated by individuals (Cosley juveniles)")+
+  labs(x="Date",y="Richness",color="Turtle ID")
+```
+
+
+#### Statistics 
+
+**Comparing Cosley plastron samples over time and among individuals**
+
+* Runs a model looking at richness over time and by individuals
+* For the random effect, used a combination of date and tub (thus it is nested within date). This was done because preliminary analyses suggested that there was no over-ridding effect of a particular tub across dates, and just including tub resulted in a singular model fit
+* Individuals rotated among tubs during the trial
+
+Run and check model
+```{r}
+pl.m <- lmer(rich~date.sc*source.ID+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific)),data=plastron.cosley.3)
+check_model(pl.m,check=c("qq","ncv"))
+```
+* Acceptable fit
+* Run stats
+```{r}
+kable.wrap(Anova(pl.m),"Result: Mixed effects ANOVA comparing richness of individuals over time")
+```
+
+* There was a significant effect of read depth (blocking variable). 
+* There was a significant difference among individuals
+* There was no overarching effect of date.
+* Based on the plot, some individuals clearly had different trends, but there was no significant interaction, likely due to the small sample sizes.
+
+### Richness (growth)
+
+**Associations between richness and growth for Cosley plastron samples**
+
+* Growth was calculated proximate to the collection of each swab (change in plastron length per day)
+* Linear regression
+```{r}
+ggplot(plastron.cosley.3,aes(x=rich,y=PL.diff.per.day))+
+  geom_point()+
+  geom_smooth(method="lm",se=T)+
+  ggtitle("Plastron richness X plastron growth (Cosley juveniles)")+
+  labs(x="Richness",y="Growth")
+```
+
+* Construct and check model assumptions
+* Individual ID will be included as a random effect
+```{r}
+#using PL
+gr.pl2 <- lmer(rich~date.sc+PL.diff.per.day+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific))+(1|source.ID),data=plastron.cosley.3)
+check_model(gr.pl2,check=c("qq","ncv"))
+
+```
+
+* Acceptable model
+* Run stats
+
+```{r}
+kable.wrap(Anova(gr.pl2),"Result: Correlation between growth rate (PL measured at each point) and richness")
+```
+
+* Growth was not significant
+
+### Richness (size)
+
+**Construct and check models looking for associations between size (PL) and richness**
+* Linear regression
+```{r}
+ggplot(plastron.cosley.3,aes(x=PL,y=rich))+
+  geom_point()+
+  geom_smooth(method="lm",se=T)+
+  ggtitle("Plastron length X plastron richness (Cosley juveniles)")+
+  labs(x="Plastron length",y="richness")
+```
+
+
+* Construct and check model assumptions 
+```{r}
+#using PL
+gr.pl3 <- lmer(rich~date.sc+PL+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific))+(1|source.ID),data=plastron.cosley.3)
+check_model(gr.pl3,check=c("qq","ncv"))
+```
+
+```{r}
+kable.wrap(Anova(gr.pl3),"Result: Correlation between size (PL) and richness")
+```
+
+* PL was not significantly associated with richness
+
+### Evenness (individuals and time)
+
+**Comparing Cosley plastron samples over time and among individuals**
+
+#### Plot
+
+* Plot individuals over time
+
+```{r}
+ggplot(plastron.cosley.3,aes(x=as.Date(date),y=even,group=source.ID))+
+  geom_point(aes(color=source.ID))+
+  geom_smooth(method="lm",se=F,aes(color=source.ID))+
+  ggtitle("date X evenness seperated by individuals (Cosely juveniles)")+
+  labs(x="Date",y="Evenness",color="Turtle ID")
+```
+
+
+#### Statistics 
+
+**Comparing evenness of Cosley plastron samples over time and among individuals**
+
+* Runs a model looking at evenness over time and by individuals
+* For the random effect, used a combination of date and tub (thus it is nested within date). This was done because preliminary analyses suggested that there was no over-ridding effect of a particular tub across dates, and just including tub resulted in a singular model fit
+
+* Run and check model
+```{r}
+pl.even.m <- lmer(even~date.sc*source.ID+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific)),data=plastron.cosley.3)
+check_model(pl.even.m,check=c("qq","ncv"))
+```
+* Acceptable fit
+* Run stats
+```{r}
+kable.wrap(Anova(pl.even.m),"Result: Mixed effects ANOVA comparing evenness of individuals over time")
+```
+
+* There was a nearly significant effect of read depth (blocking variable). 
+* There no significant difference among individuals
+* There was a positive effect of date
+* Based on the plot, some individuals clearly had different trends, but there was no significant interaction, likely due to the small sample sizes.
+
+### Evenness (growth)
+
+**Associations between evenness and growth for Cosley plastron samples**
+
+* Growth was calculated proximate to the collection of each swab (change in plastron length per day)
+* Linear regression
+```{r}
+ggplot(plastron.cosley.3,aes(x=even,y=PL.diff.per.day))+
+  geom_point()+
+  geom_smooth(method="lm",se=T)+
+  ggtitle("Plastron evenness X plastron growth (Cosley juveniles)")+
+  labs(x="evenness",y="Growth")
+```
+
+* Construct and check model assumptions
+* Individual ID will be included as a random effect
+```{r}
+#using PL
+gr.pl4 <- lmer(even~date.sc+PL.diff.per.day+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific))+(1|source.ID),data=plastron.cosley.3)
+check_model(gr.pl4,check=c("qq","ncv"))
+
+```
+
+* Acceptable model
+* Run stats
+
+```{r}
+kable.wrap(Anova(gr.pl4),"Result: Correlation between growth rate (PL measured at each point) and evenness")
+```
+
+* Growth was not significant
+
+### Evenness (size)
+
+**Construct and check models looking for associations between size (PL) and evenness**
+* Linear regression
+```{r}
+ggplot(plastron.cosley.3,aes(x=PL,y=even))+
+  geom_point()+
+  geom_smooth(method="lm",se=T)+
+  ggtitle("Plastron length X plastron evenness (Cosley juveniles)")+
+  labs(x="Plastron length",y="evenness")
+```
+
+
+* Construct and check model assumptions 
+```{r}
+#using PL
+gr.pl5 <- lmer(even~date.sc+PL+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific))+(1|source.ID),data=plastron.cosley.3)
+
+```
+
+```{r}
+kable.wrap(Anova(gr.pl5),"Result: Correlation between size (PL) and evenness")
+```
+
+* PL was not significantly associated with evenness
+
+
+### Beta-diversity (individuals, time, and growth)
+
+#### PCoA plots
+
+**Look for changes in beta diversity over time and by individuals**
+
+* Colored by date
+```{r}
+
+#colored by date
+for(i in 1:length(dists)){
+
+  meta.i <- plastron.cosley.3
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+centroids <- aggregate(cbind(x,y)~date,meta.i,mean)
+ colnames(centroids)[2:3] <- c("x.cent","y.cent")
+ meta.i <- merge(meta.i,centroids,by="date")
+  
+  plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(fill=date,color=date,size=4,stroke=1))+
+    theme_bw()+
+    geom_segment(aes(x=x.cent, y=y.cent, xend=x, yend=y, color = date))+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    ggtitle(paste(names(dists)[i],"(Cosely headstart plastron samples)"))
+  print(plot)}
+
+```
+
+* There is an extremely clear change over time
+* This is particularly pronounced for presence/absence based metrics
+
+#### PERMANOVAs
+
+**PERMANOVAs on plastron samples (Cosley juveniles) examining changes over time, differences among individuals, effects of tubs, and associations with growth**
+
+* Run PERMANOVAs 
+  * Using the following order of terms: read depth, date (continuous), specific (tub), source.ID (individual), growth
+
+```{r, results = 'asis'}
+temp<- perm.loop("dist_subset(dists[[i]],plastron.cosley.3$sample.ID)~log10(read.depth)+date.sc+ specific+ source.ID + PL.diff.per.day", plastron.cosley.3, c("read.depth","date","specific","source.ID", "PL.diff.per.day"),"PERMANOVA results: Cosley headstart plastrons (PL for growth rate)",distance.list=dists)
+
+```
+* Strongly significant effect of date
+* Usually an effect of individual (i.e., each individual has a distinct microbiome)
+* Usually an effect of tub
+* Often a significant effect of growth
+
+**PERMANOVAs on size**
+
+* Look for associations between beta diversity and size
+* Only the size variable is of interest here (the rest are redundant with the previous model and are included as blocking variables)
+
+```{r, results = 'asis'}
+temp<- perm.loop("dist_subset(dists[[i]],plastron.cosley.3$sample.ID)~log10(read.depth)+date.sc+ specific+ source.ID + PL", plastron.cosley.3, c("read.depth","date","specific","source.ID", "PL"),"PERMANOVA results: Cosley headstart plastron (size based on PL)",distance.list=dists)
+```
+
+
+
+
+## Shedd
+
+**Head start plastrons**
+
+* Make Shedd plastron subset
+
+```{r}
+plastron.shedd <- plastron[plastron$location=="Shedd",]
+```
+
+### Richness
+
+**compare individuals, dates and tubs (Shedd plastron)**
+
+* Plot
+```{r}
+ggplot(plastron.shedd,aes(x=specific,y=rich,fill=date))+
+  geom_boxplot()+
+  ggtitle("Shedd plastron richness over time")
+```
+
+* Make and check model
+```{r}
+plsrm1 <- lm(rich~log10(read.depth)+source.ID+specific*date,data=plastron.shedd)
+check_model(plsrm1,check=c("qq","ncv"))
+```
+
+* Reasonable fit
+
+```{r}
+kable.wrap(Anova(plsrm1),"ANOVA results: Shedd headstart plastron richness")
+```
+
+* No significant effects, but there were only two dates and the sample sizes were so small that this is questionable
+
+
+### Evenness
+
+**compare individuals, dates and tubs (Shedd plastron)**
+
+* Plot
+```{r}
+ggplot(plastron.shedd,aes(x=specific,y=even,fill=date))+
+  geom_boxplot()+
+  ggtitle("Shedd plastron evenness over time")
+```
+
+* Make and check model
+```{r}
+plsrm1 <- lm(even~log10(read.depth)+source.ID+specific*date,data=plastron.shedd)
+check_model(plsrm1,check=c("qq","ncv"))
+```
+
+* Reasonable fit
+
+```{r}
+kable.wrap(Anova(plsrm1),"ANOVA results: Shedd headstart plastron evenness")
+```
+
+* Nearly significant effect of date. Again, sample sizes are very small
+
+
+### Beta diversity
+
+**compare individuals, dates, and tubs (Shedd plastron)**
+
+#### PCoAs
+
+```{r}
+for(i in 1:length(dists)){
+
+  meta.i <- plastron.shedd
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+  
+  plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(fill=specific,color=date,shape=specific,size=4,stroke=1))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    ggtitle(paste(names(dists)[i],"(Shedd headstart plastron)"))
+  print(plot)}
+
+```
+
+#### Statistics
+
+**compare individuals, dates, and tubs (Shedd plastron)**
+
+* Run PERMANOVA
+
+```{r, results = 'asis'}
+
+temp<- perm.loop("dist_subset(dists[[i]],plastron.shedd$sample.ID)~log10(read.depth)+date + specific + source.ID", plastron.shedd, c("read.depth","date","specific","source.ID"),"PERMANOVA results: Shedd headstart plastron",distance.list=dists)
+
+```
+
+* Date is strongly significant
+* Tub is significant for ASVs, but generally slightly non significant for families
+
+## Shedd vs Cosley vs wild
+
+**Comparing plastron samples for wild and captive turtles (and years)**
+
+### Overview
+
+* Comparative analyses of plastron data are challenging because data are available from disparate groups:
+  * Wild adults
+    * 2018
+    * 2019
+  * Captive
+    * Cosley (multiple dates, tubs, and individuals)
+    * Shedd (two tubs, two dates, multiple individuals)
+* These groupings are not ideal, but they can be analyzed following several steps
+  * First, in the captive animals, in both cases, data will be limited to the last day
+    * This is the closest date to release
+    * All individuals on the last day will be included, not just the ones that had been used previously in plastron.cosely.3
+  * Second, a single variable (specific.years) will be nested in site
+    * This has the two years for wild and tubs for captive turtles
+    * It's not ideal, but should suitably partition the variance for PERMANOVAs
+  * We will only look statistically at beta diversity, because these issues in model design make it difficult to trust the linear models, and the samples sizes would be too small in most subsets to justify testing them independently, particularly given the large number of pairwise comparisons that would be required.
+* Will additionally compare years for wild turtles
+
+* Note that the captive vs wild comparison is entirely confounded by the age difference (juvenile vs adult)
+
+**Make subsets**
+
+```{r}
+
+plastron.wild <- plastron[plastron$captive.wild == "wild",] #subset to wild plastron samples
+
+
+plastron.shedd.last <- plastron.shedd[plastron.shedd$date=="2020-04-08",] #subset to last day for shedd
+
+
+plastron.cosley.last <- plastron.cosley[plastron.cosley$date == "2019-08-08",] #subset to last day for cosley
+
+
+plastron.sites <- rbind.data.frame(plastron.wild,plastron.shedd.last,plastron.cosley.last ) #combines into single data set
+```
+
+### Heatmaps
+
+* Note: the ASV and Family graphs are labeled "OTU" on the Y axis. This is due to a bug in phyloseq that I have been unable to isolate.
+
+```{r}
+phylo.heat.loop(phylo.list, data = plastron.sites , ID.col = "sample.ID", order1 = "captive.wild", order2 = "location.general", order3="year",title = "Plastron by location and year",method="NMDS",taxa.label=label.list)
+
+```
+
+* All sites and years are clearly different until class (especially wild 2018)
+* The wild 2018 difference remains even at the Phylum level
+
+### Richness
+
+**Comparing plastron samples for wild and captive turtles (and years)**
+
+* Boxplot
+```{r}
+ggplot(plastron.sites,aes(x=location.general,y=rich,fill=specific.year))+
+  geom_boxplot()+
+  ggtitle("Plastron richness among sites and tubs or years")
+```
+
+
+### Evenness
+
+**Comparing plastron samples for wild and captive turtles (and years)**
+
+* Boxplot
+```{r}
+ggplot(plastron.sites,aes(x=location.general,y=even,fill=specific.year))+
+  geom_boxplot()+
+  ggtitle("Plastron evenness among sites")
+```
+
+
+### Beta diversity
+
+**Comparing plastron samples for wild and captive turtles (and years)**
+
+#### All sites
+
+##### PCoAs and boxplots
+
+```{r}
+for(i in 1:length(dists)){
+
+  meta.i <- plastron.sites
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+  
+  plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(fill=location.general,color=location.general,shape=specific.year,size=4,stroke=1))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    ggtitle(paste(names(dists)[i],"(plastron among sites)"))
+  print(plot)}
+
+```
+
+
+##### PERMANOVAs
+
+* Run PERMANOVAs
+
+```{r, results = 'asis'}
+
+temp<- perm.loop("dist_subset(dists[[i]],plastron.sites$sample.ID)~log10(read.depth)+location.general/specific.year", plastron.sites, c("read.depth","location.general"),"PERMANOVA results: Plastron samples among sites",distance.list=dists)
+
+```
+
+* All site comparisons were significant
+
+#### Wild (years)
+
+**Comparing plastron samples for wild samples across years**
+
+* Run PERMANOVAs (see previous section for PCoAs)
+
+```{r, results = 'asis'}
+
+temp<- perm.loop("dist_subset(dists[[i]],plastron.sites$sample.ID)~log10(read.depth)+as.factor(year)", plastron.sites, c("read.depth","year"),"PERMANOVA results: Wild plastron samples across years",distance.list=dists)
+
+```
+
+* Years were significantly different in all cases except for weighted unifrac for ASVs
+
+
+
+# Cloaca X plastron
+
+## Correlations
+
+### Subset
+
+* Subsets data to paired cloaca and plastron samples (wild turtles only)
+* Reorganizes data into a paired format for tests
+```{r}
+
+cloaca.plastron <- cloaca[which(cloaca$captive.wild == "wild"),] #subsets to cloacal samples that also have a platron sample
+
+cloaca.plastron <- meta[which(paste(meta$source.ID, meta$date) %in% paste(cloaca.plastron$source.ID , cloaca.plastron$date)),] #uses cloaca.plastron to subset the metadata to both the cloacal and plastron samples for individuals that have both
+
+cloaca.plastron  <- cloaca.plastron[order(cloaca.plastron$source.ID),]
+
+
+#reformat data into a paired layout for plots and correlation tests
+cloaca.cor <- cloaca.plastron[cloaca.plastron$sample.type == "cloaca",c("source.ID","location.general","year","captive.wild","rich","even","read.depth")]
+colnames(cloaca.cor)[5:7] <- gsub(" ",".",paste("c",colnames(cloaca.cor)[5:7]))
+
+
+plastron.cor <- cloaca.plastron[cloaca.plastron$sample.type == "plastron",c("rich","even","read.depth")]
+colnames(plastron.cor)[1:3] <- gsub(" ",".",paste("p",colnames(plastron.cor)[1:3]))
+
+
+cloaca.plastron.cor <- cbind.data.frame(cloaca.cor,plastron.cor)
+
+
+```
+
+
+### Richness
+
+**Look for correlations between plastron and cloacal richness**
+
+* Plot
+```{r}
+ggplot(cloaca.plastron.cor,aes(x=p.rich,y=c.rich,color=location.general,fill=location.general))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  ggtitle("Cloaca richness X plastron richness")
+```
+
+* Construct and check model
+```{r}
+cpm1 <- lm(p.rich~c.rich*as.factor(year),data=cloaca.plastron.cor)
+check_model(cpm1,check=c("qq","ncv"))
+```
+
+* Good fit
+```{r}
+kable.wrap(Anova(cpm1),"Result: ANOVA looking for associations between cloacal and plastron richness")
+```
+
+* No significant association (as expected)
+
+
+### Evenness
+
+**Look for correlations between plastron and cloacal evenness**
+
+* Plot
+```{r}
+ggplot(cloaca.plastron.cor,aes(x=p.even,y=c.even,color=location.general,fill=location.general))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  ggtitle("Cloaca evenness X plastron evenness")
+```
+
+* Construct and check model
+```{r}
+cpm2 <- lm(p.even~c.even*as.factor(year),data=cloaca.plastron.cor)
+check_model(cpm2,check=c("qq","ncv"))
+```
+
+* Acceptable fit
+```{r}
+kable.wrap(Anova(cpm2),"Result: ANOVA looking for associations between cloacal and plastron evenness")
+```
+
+* No significant association
+
+### Beta diversity
+
+**Look for associations between plastron and cloacal beta diversity**
+
+#### Plots
+
+* Make scatter plots of dissimilarities that will be used in Mantel testing
+  * For each plot, only the lower left hand of the dist object will be used
+
+```{r}
+
+for(i in 1:length(dists)){
+  mantel.plot.i <- cbind.data.frame(split.dist(as.matrix(dist_subset(dists[[i]],cloaca.plastron[cloaca.plastron$sample.type=="cloaca","sample.ID"])))[,1],
+       split.dist(as.matrix(dist_subset(dists[[i]],cloaca.plastron[cloaca.plastron$sample.type=="plastron","sample.ID"])))  )
+  colnames(mantel.plot.i)[1:2] <- c("cloaca","plastron")
+  meta.i <- cloaca.plastron
+  colnames(meta.i)[which(colnames(meta.i)=="sample.ID")] <- "ID1"
+  mantel.plot.i <- merge(mantel.plot.i,meta.i,by="ID1",all.x=T,all.y=F)
+  colnames(meta.i)[which(colnames(meta.i)=="ID1")] <- "ID2"
+  mantel.plot.i <- merge(mantel.plot.i,meta.i,by="ID2",all.x=T,all.y=F)
+  mantel.plot.i$color <- paste(mantel.plot.i$location.general.x,mantel.plot.i$year.x,mantel.plot.i$location.general.y,mantel.plot.i$year.y)
+  
+  m.plot.i <- ggplot(mantel.plot.i,aes(x=cloaca,y=plastron,fill=color,color=color))+
+    geom_point()+
+    geom_smooth(method="lm")+
+    ggtitle(paste(names(dists)[i],"(correlation of plastron and cloaca dissimilarities)"))
+  print(m.plot.i )
+  }
+```
+
+
+#### Mantel
+
+* Run test using all paired cloaca and plastron samples, with permutations constrained by location X year combinations
+
+```{r}
+set.seed(1234)
+mantel.res <- vector("list",length(dists))
+
+for(i in 1:length(dists)){
+  
+  m.res.i <- mantel(dist_subset(dists[[i]],cloaca.plastron[cloaca.plastron$sample.type=="cloaca","sample.ID"]),
+       dist_subset(dists[[i]],cloaca.plastron[cloaca.plastron$sample.type=="plastron","sample.ID"]),
+       permutations=5000,strata=cloaca.plastron.cor$year)
+  mantel.res[[i]] <- c(m.res.i$statistic,m.res.i$signif)}
+mantel.res <- do.call("rbind.data.frame",mantel.res)
+colnames(mantel.res) <- c("mantel.r","p")
+mantel.res$p.adjusted <- c(p.adjust(mantel.res$p[1:4],"holm"),p.adjust(mantel.res$p[5:8],"holm"))
+rownames(mantel.res) <- names(dists)
+kable.wrap(mantel.res,"Results: Mantel tests with permutations constrained by year")
+
+```
+
+* Usually a significant association in the ASVs, but not by families
+
+## Comparisons of mean values
+
+**Comparing cloaca and plastron samples**
+
+* With the exception of the heatmaps, comparisons will only be made for wild individuals because including the captive juveniles results in models that are more complex than can be fit with the current data
+
+### Heatmaps
+
+* Note: the ASV and Family graphs are labeled "OTU" on the Y axis. This is due to a bug in phyloseq that I have been unable to isolate.
+```{r}
+phylo.heat.loop(phylo.list, data = cloaca.plastron , ID.col = "sample.ID", order2 = "sample.type", order1 = "location.general", order3="age", order4 = "year",title = "Cloaca vs plastron",method="NMDS",taxa.label=label.list)
+```
+
+
+### Richness
+
+**Comparing cloaca and plastron samples for wild turtles**
+
+#### Boxplot
+
+```{r}
+ggplot(cloaca.plastron,aes(y=rich,x=sample.type, fill = paste(year)))+
+  geom_boxplot()+
+  ggtitle("Cloaca vs plastron richnness (wild)")
+```
+
+
+#### Statistics
+
+* Run and check model
+
+```{r}
+cxprm1 <- lm(rich~sample.type*as.factor(year)+log10(read.depth)+source.ID,data = cloaca.plastron)
+check_model(cxprm1,check=c("qq","ncv"))
+```
+
+* Good fit
+* Run ANOVA
+
+```{r}
+kable.wrap(Anova(cxprm1),"Result: ANOVA comparing cloaca and plastron richness")
+```
+
+* Year, sample type, and the interaction were significant.
+* Although the slopes differed, plastron had higher richness in both years
+
+
+### Evenness
+
+**Comparing cloaca and plastron samples for wild turtles**
+
+#### Boxplot
+
+```{r}
+ggplot(cloaca.plastron,aes(y=even,x=sample.type, fill = paste(year)))+
+  geom_boxplot()+
+  ggtitle("Cloaca vs plastron evennness (wild)")
+```
+
+* Pretty obvious interaction
+
+#### Statistics
+
+* Run and check model
+
+```{r}
+cxpem1 <- lm(even~sample.type*as.factor(year)+log10(read.depth)+source.ID,data = cloaca.plastron)
+check_model(cxpem1,check=c("qq","ncv"))
+```
+
+* Ok fit
+* Run ANOVA
+
+```{r}
+kable.wrap(Anova(cxpem1),"Result: ANOVA comparing cloaca and plastron evenness")
+```
+
+* Essentially everything is significant
+* Higher plastron evenness in 2018, but higher cloaca evenness in 2019
+
+
+### Beta diversity
+
+#### PCoAs
+
+```{r}
+for(i in 1:length(dists)){
+
+  meta.i <-cloaca.plastron
+  pcoa <- cmdscale(dist_subset(dists[[i]],meta.i$sample.ID),k=2,add=T,eig=T) #calculates pcoa with a correction for negative eigenvalues (look up the add argument)
+  pcoa.eig <- (pcoa$eig[1:2]/sum(pcoa$eig))*100 #calculates percent variance explained by each of the first coordinates
+  meta.i$x <- pcoa$points[,1] #adds x coordinates 
+  meta.i$y <-  pcoa$points[,2] #adds y coordinates 
+  
+  plot <- ggplot(meta.i,aes(x = x,y=y))+
+    geom_point(aes(color=sample.type,shape=as.factor(year),size=4,stroke=1))+
+    theme_bw()+
+    xlab(pcoa.eig[1])+
+    ylab(pcoa.eig[2])+
+    ggtitle(paste(names(dists)[i],"(Plastron X cloaca)"))
+  print(plot)}
+
+```
+
+* Obvious differences in years and sample types, thought two cloaca samples kept falling out with the plastron samples
+
+#### PERMAOVAs
+
+```{r, results = 'asis'}
+temp<- perm.loop("dist_subset(distance.list[[i]],cloaca.plastron$sample.ID)~log10(read.depth)+source.ID+as.factor(year)*sample.type",cloaca.plastron,c("read.depth","source.ID","year","sample.type","sample.type*year"),"PERMANOVA results: cloaca vs plastron (wild)",distance.list=dists)
+```
+
+* Nearly everything is significant, including the interaction with year (but generally not individual ID).
+
