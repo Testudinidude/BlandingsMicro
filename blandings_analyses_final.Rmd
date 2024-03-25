@@ -1,7 +1,7 @@
 ---
-title: "Supplemental material"
-author: "TBA"
-date: "19/06/2021"
+title: "Code, analyses, and additional figures for: Variable effects of captivity on microbiomes in populations of IUCN-endangered Blanding’s turtles (Emydoidea blandingii)"
+author: "Lauren Jenkins, Donald T. McKnight, Matthew Parks, Nathan W. Byer, Francis J. Oliaro, Dan Thompson, and Rodney Scott"
+date: "13/02/2024"
 output: 
   html_document:
     toc: true
@@ -61,6 +61,7 @@ kable.wrap <- function(x,caption,row.names=NA){
 * Make sure date is in YYYY-MM-DD
 
 ```{r}
+setwd("C:/Users/Donald McKnight/Documents/other papers/blandings microbiomes/analyses/analyses_final/for paper")
 meta <- read.csv("Supplemental.metadata.csv")
 
 rownames(meta) <- meta$sample.ID
@@ -1227,7 +1228,7 @@ venn.trip <- function(data, category = rep("",
 
 * Examine results of 3 Zymo Research mock bacterial communities that were extracted and sequenced alongside the actual samples
 
-```{r, eval = FALSE}
+```{r}
 mock <- read.csv("Supplemental mock.csv")
 
 ggplot(mock,aes(x=sample,y=proportion.of.reads,fill=species))+
@@ -2635,8 +2636,10 @@ ggplot(plastron.cosley.3,aes(x=as.Date(date),y=even,group=source.ID))+
 pl.even.m <- lmer(even~date.sc*source.ID+log10(read.depth)+(1|paste(plastron.cosley.3$date,plastron.cosley.3$specific)),data=plastron.cosley.3)
 check_model(pl.even.m,check=c("qq","ncv"))
 ```
+
 * Acceptable fit
 * Run stats
+
 ```{r}
 kable.wrap(Anova(pl.even.m),"Result: Mixed effects ANOVA comparing evenness of individuals over time")
 ```
